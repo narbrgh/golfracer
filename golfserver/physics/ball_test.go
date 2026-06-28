@@ -19,7 +19,7 @@ func TestBallFallsAndSettles(t *testing.T) {
 
 	sawAirborne := false
 	for i := 0; i < 600; i++ { // 10s upper bound, generous for this shot
-		ball.Tick(dt, groundY)
+		ball.Tick(dt, groundY, 0, -1e9, 1e9, -1e9)
 		if !ball.Resting {
 			sawAirborne = true
 		} else {
@@ -38,8 +38,9 @@ func TestBallFallsAndSettles(t *testing.T) {
 	if math.Abs(ball.Y-expectedRestY) > 0.5 {
 		t.Fatalf("expected ball resting at y=%.2f, got y=%.2f", expectedRestY, ball.Y)
 	}
-	if ball.VX != 0 || ball.VY != 0 {
-		t.Fatalf("expected zero velocity at rest, got vx=%.2f vy=%.2f", ball.VX, ball.VY)
+	speed := math.Hypot(ball.VX, ball.VY)
+	if speed >= RestSpeedThreshold {
+		t.Fatalf("expected speed < %.1f at rest, got %.2f (vx=%.2f vy=%.2f)", RestSpeedThreshold, speed, ball.VX, ball.VY)
 	}
 }
 
@@ -53,7 +54,7 @@ func TestBallNeverPassesThroughGround(t *testing.T) {
 	ball.Shoot(0, 50) // straight down, no arc
 
 	for i := 0; i < 600; i++ {
-		ball.Tick(dt, groundY)
+		ball.Tick(dt, groundY, 0, -1e9, 1e9, -1e9)
 		if ball.Y+ball.Radius > groundY+0.01 {
 			t.Fatalf("ball ended up below ground at tick %d: y=%.2f", i, ball.Y)
 		}

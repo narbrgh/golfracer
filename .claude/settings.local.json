@@ -2,7 +2,17 @@
   "permissions": {
     "allow": [
       "Bash(ls /Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/memory/ 2>/dev/null)",
-      "Read(//Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/memory/**)"
+      "Read(//Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/memory/**)",
+      "Bash(rm /Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/memory/project_speedgolf.md)",
+      "Bash(rm /Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/memory/MEMORY.md)",
+      "Bash(rmdir /Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/memory)",
+      "Bash(rmdir /Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver)",
+      "Bash(ls /Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/)",
+      "Read(//Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/**)",
+      "Bash(go get *)",
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(npx tsc *)"
     ]
   }
 }
