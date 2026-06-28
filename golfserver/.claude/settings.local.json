@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /Users/erikinterval/dev/ts/golf01 -type f | sort)",
+      "Read(//Users/erikinterval/dev/ts/golf01/**)"
+    ]
+  }
+}

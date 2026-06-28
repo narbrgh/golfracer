@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/memory/ 2>/dev/null)",
+      "Read(//Users/erikinterval/.claude/projects/-Users-erikinterval-dev-ts-golf01-golfserver/memory/**)"
+    ]
+  }
+}
