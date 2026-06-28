@@ -12,7 +12,8 @@
       "Bash(go get *)",
       "Bash(go build *)",
       "Bash(go test *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(git -C /Users/erikinterval/dev/ts/golf01 rm -rf --cached golfracer)"
     ]
   }
 }
