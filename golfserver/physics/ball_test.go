@@ -7,6 +7,11 @@ import (
 
 const dt = 1.0 / 60.0
 
+// flatGround returns a single horizontal edge representing flat ground at the given Y.
+func flatGround(y float64) []Edge {
+	return []Edge{NewEdge(-1e6, y, 1e6, y)}
+}
+
 // TestBallFallsAndSettles checks the full lifecycle: shoot it, watch it
 // go airborne, and confirm it eventually settles to rest sitting on the
 // ground with zero velocity.
@@ -17,9 +22,10 @@ func TestBallFallsAndSettles(t *testing.T) {
 
 	ball.Shoot(150, -300) // arcing shot: rightward and upward
 
+	edges := flatGround(groundY)
 	sawAirborne := false
 	for i := 0; i < 600; i++ { // 10s upper bound, generous for this shot
-		ball.Tick(dt, groundY, 0, -1e9, 1e9, -1e9)
+		ball.Tick(dt, edges, -1e6, 1e6, -1e9)
 		if !ball.Resting {
 			sawAirborne = true
 		} else {
@@ -53,8 +59,9 @@ func TestBallNeverPassesThroughGround(t *testing.T) {
 	ball := NewBall(50, 100, radius)
 	ball.Shoot(0, 50) // straight down, no arc
 
+	edges := flatGround(groundY)
 	for i := 0; i < 600; i++ {
-		ball.Tick(dt, groundY, 0, -1e9, 1e9, -1e9)
+		ball.Tick(dt, edges, -1e6, 1e6, -1e9)
 		if ball.Y+ball.Radius > groundY+0.01 {
 			t.Fatalf("ball ended up below ground at tick %d: y=%.2f", i, ball.Y)
 		}

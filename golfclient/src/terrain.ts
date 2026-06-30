@@ -2,7 +2,9 @@ export interface CourseTheme {
   skyTop: string       // hex — sky gradient top
   skyBottom: string    // hex — sky gradient bottom
   mountain1: string    // hex — far/back mountains
+  mountain1Y: number   // baseline Y as fraction of worldH (0=top, 1=bottom)
   mountain2: string    // hex — near/front mountains
+  mountain2Y: number   // baseline Y as fraction of worldH
   groundFill: string   // hex — terrain fill
   groundLine: string   // hex — terrain edge line
   groundLineW: number
@@ -19,7 +21,9 @@ export const DEFAULT_THEME: CourseTheme = {
   skyTop:     '#07071a',
   skyBottom:  '#111125',
   mountain1:  '#1c1c30',
+  mountain1Y: 0.45,
   mountain2:  '#252540',
+  mountain2Y: 0.58,
   groundFill: '#252515',
   groundLine: '#667755',
   groundLineW: 2,
@@ -40,6 +44,64 @@ export function hexWithAlpha(hex: string, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha})`
 }
 
+// ---- Spline terrain ----
+
+export interface ControlPoint { x: number; y: number }
+
+export interface SplineCoeff {
+  x0: number; x1: number
+  a: number; b: number; c: number; d: number
+}
+
+// Catmull-Rom spline. Phantom endpoints are reflected so the curve passes
+// through the first and last control points without clamping.
+export function buildSpline(pts: ControlPoint[]): SplineCoeff[] {
+  if (pts.length < 2) return []
+  const p = [...pts].sort((a, b) => a.x - b.x)
+  const n = p.length
+  const out: SplineCoeff[] = []
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = i > 0     ? p[i-1].y : 2*p[0].y   - p[1].y
+    const p1 = p[i].y
+    const p2 = p[i+1].y
+    const p3 = i < n - 2 ? p[i+2].y : 2*p[n-1].y - p[n-2].y
+    out.push({
+      x0: p[i].x, x1: p[i+1].x,
+      a: p1,
+      b: 0.5 * (-p0 + p2),
+      c: 0.5 * (2*p0 - 5*p1 + 4*p2 - p3),
+      d: 0.5 * (-p0 + 3*p1 - 3*p2 + p3),
+    })
+  }
+  return out
+}
+
+export function splineY(x: number, coeffs: SplineCoeff[]): number {
+  if (coeffs.length === 0) return 650
+  let s = coeffs[0]
+  for (let i = 0; i < coeffs.length; i++) {
+    s = coeffs[i]
+    if (x <= s.x1 || i === coeffs.length - 1) break
+  }
+  const t = s.x1 === s.x0 ? 0 : (x - s.x0) / (s.x1 - s.x0)
+  return s.a + t*(s.b + t*(s.c + t*s.d))
+}
+
+export function splineSlope(x: number, coeffs: SplineCoeff[]): number {
+  if (coeffs.length === 0) return 0
+  let s = coeffs[0]
+  for (let i = 0; i < coeffs.length; i++) {
+    s = coeffs[i]
+    if (x <= s.x1 || i === coeffs.length - 1) break
+  }
+  const h = s.x1 - s.x0
+  if (h === 0) return 0
+  const t = (x - s.x0) / h
+  return (s.b + t*(2*s.c + t*3*s.d)) / h
+}
+
+// ---- Wave terrain ----
+
 export interface TerrainWave {
   amplitude: number
   period: number
@@ -51,6 +113,60 @@ export interface TerrainSegment {
   waves: TerrainWave[]
 }
 
+export type HazardKind = 'sand' | 'water' | 'tree'
+
+// A hazard is positioned in world coordinates and lives on the Course so it's
+// editable and saved/loaded with the map.
+//
+// Water is a flood-fill: the player shapes a valley in the terrain, drops an
+// anchor at `cx` somewhere inside it, and `level` is the water-surface Y the
+// valley fills up to. The body spreads left/right from the anchor until the
+// ground rises above `level`, and fills between the terrain and the surface — so
+// it always conforms to the land instead of being a floating box. `w`/`h` are
+// unused for water; sand uses `w` (footprint) and `h` (mound height); trees use
+// `h` (height).
+export interface Hazard {
+  kind: HazardKind
+  cx: number
+  w: number
+  h: number
+  level?: number
+}
+
+// Walks outward from `cx` to find where the terrain rises above `level` on
+// each side — the pool's banks. Returns null if `cx` isn't actually underwater
+// at `level` (ground there sits above the surface), which means the trap is
+// misplaced and should render/collide as nothing rather than a phantom pool.
+export function waterPoolBounds(
+  cx: number,
+  level: number,
+  ptY: (x: number) => number,
+  worldW: number,
+  step = 4,
+): { left: number; right: number } | null {
+  if (ptY(cx) < level) return null
+
+  let left = cx
+  while (left - step >= 0 && ptY(left - step) >= level) left -= step
+  if (left - step >= 0) {
+    const yA = ptY(left), yB = ptY(left - step)
+    left -= ((level - yA) / (yB - yA)) * step
+  } else {
+    left = 0
+  }
+
+  let right = cx
+  while (right + step <= worldW && ptY(right + step) >= level) right += step
+  if (right + step <= worldW) {
+    const yA = ptY(right), yB = ptY(right + step)
+    right += ((level - yA) / (yB - yA)) * step
+  } else {
+    right = worldW
+  }
+
+  return { left, right }
+}
+
 export interface Course {
   worldW: number
   worldH: number
@@ -58,7 +174,12 @@ export interface Course {
   teeBackX: number
   teeForwardX: number
   holeX: number
+  useSpline: boolean
+  controlPoints: ControlPoint[]
+  useWaves: boolean
   segments: TerrainSegment[]
+  hazards: Hazard[]
+  theme: CourseTheme
 }
 
 // Precomputed segment — startX and offset are derived for height continuity at joints.
@@ -120,6 +241,17 @@ export const DEFAULT_COURSE: Course = {
   teeBackX: 200,
   teeForwardX: 400,
   holeX: 3700,
+  useSpline: false,
+  controlPoints: [
+    { x: 0,    y: 650 },
+    { x: 700,  y: 570 },
+    { x: 1400, y: 710 },
+    { x: 2100, y: 625 },
+    { x: 2800, y: 695 },
+    { x: 3500, y: 610 },
+    { x: 4000, y: 650 },
+  ],
+  useWaves: true,
   segments: [{
     length: 4000,
     waves: [
@@ -127,5 +259,11 @@ export const DEFAULT_COURSE: Course = {
       { amplitude: 40, period: 300, phase: 0 },
       { amplitude: 20, period: 150, phase: 0 },
     ]
-  }]
+  }],
+  hazards: [
+    { kind: 'sand',  cx:  900, w: 180, h: 14 },
+    { kind: 'water', cx: 2080, w: 0, h: 0, level: 715 },
+    { kind: 'sand',  cx: 3150, w: 160, h: 14 },
+  ],
+  theme: DEFAULT_THEME,
 }

@@ -48,12 +48,66 @@
   flex: 1;
   background: #0a0a14;
   overflow: hidden;
-  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
-.editor-preview canvas {
+.preview-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: #0e0e0e;
+  border-bottom: 1px solid #222;
+  flex-shrink: 0;
+}
+
+.view-btn {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  color: #666;
+  font: 11px monospace;
+  padding: 3px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  transition: background 0.1s, color 0.1s;
+}
+.view-btn:hover { background: #252525; color: #aaa; }
+.view-btn.active {
+  background: #0f1f2f;
+  border-color: #2a5a8a;
+  color: #5b9bd5;
+}
+
+.preview-canvas-wrap {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.preview-canvas-wrap canvas {
   position: absolute;
   inset: 0;
+}
+
+.game-zoom-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: #0e0e0e;
+  border-top: 1px solid #222;
+  flex-shrink: 0;
+}
+
+.game-zoom-bar input[type='range'] {
+  height: 3px;
+  accent-color: #5b9bd5;
+  cursor: pointer;
 }
 
 .editor-section {
@@ -61,6 +115,9 @@
 }
 
 .section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 10px;
   font-weight: bold;
   color: #666;
@@ -69,6 +126,54 @@
   padding: 6px 2px 5px;
   border-bottom: 1px solid #2a2a2a;
   margin-bottom: 8px;
+}
+
+.collapse-btn {
+  background: none;
+  border: none;
+  color: #555;
+  font: 13px monospace;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+.collapse-btn:hover { color: #aaa; }
+
+.section-content { /* no extra style needed — display toggled via JS */ }
+
+.mode-toggle {
+  flex: 1;
+  text-align: center;
+  background: #1a1a1a;
+  border-color: #333;
+  color: #666;
+}
+.mode-toggle.active {
+  background: #1a2a1a;
+  border-color: #4a7a4a;
+  color: #8bc87a;
+}
+.mode-toggle:hover { background: #252525; color: #aaa; }
+.mode-toggle.active:hover { background: #223022; color: #9abf70; }
+
+.spline-hint {
+  font-size: 10px;
+  color: #5a8aaa;
+  line-height: 1.6;
+  margin-bottom: 6px;
+  padding: 5px 6px;
+  background: rgba(40,80,120,0.15);
+  border-radius: 3px;
+  border-left: 2px solid #2a5a8a;
+}
+
+.spline-count {
+  font-size: 11px;
+  color: #777;
+  margin-bottom: 6px;
 }
 
 .editor-segment {
@@ -180,6 +285,24 @@
 .del-btn:hover {
   background: #3a2020;
   color: #dd8080;
+}
+
+.color-picker {
+  width: 36px;
+  height: 22px;
+  padding: 1px 2px;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  background: #252525;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.color-picker::-webkit-color-swatch-wrapper { padding: 0 }
+.color-picker::-webkit-color-swatch { border: none; border-radius: 2px }
+
+.slider-row:has(.color-picker) .slider-label {
+  width: 90px;
 }
 
 .editor-sidebar::-webkit-scrollbar {

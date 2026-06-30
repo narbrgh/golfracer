@@ -1,5 +1,5 @@
-import { buildSegments, terrainY, terrainSlope, DEFAULT_COURSE } from './terrain'
-import type { Course, BuiltSegment } from './terrain'
+import { buildSegments, terrainY, DEFAULT_COURSE, hexWithAlpha, buildSpline, splineY, waterPoolBounds } from './terrain'
+import type { Course, BuiltSegment, SplineCoeff } from './terrain'
 import { initEditor } from './editor'
 
 // ---- Canvas / render constants ----
@@ -20,13 +20,50 @@ const SHOT_DELAY_MS    = 2500
 // ---- Course state (mutable when editor pushes a new course) ----
 let course: Course = DEFAULT_COURSE
 let builtSegs: BuiltSegment[] = buildSegments(course)
+let splineCoeffs: SplineCoeff[] = buildSpline(course.controlPoints)
 
-function tY(x: number)     { return terrainY(x, builtSegs) }
-function tSlope(x: number) { return terrainSlope(x, builtSegs) }
+function tY(x: number): number {
+  const s = course.useSpline, w = course.useWaves
+  if (s && w) return splineY(x, splineCoeffs) + terrainY(x, builtSegs) - course.baseGround
+  if (s)      return splineY(x, splineCoeffs)
+  if (w)      return terrainY(x, builtSegs)
+  return course.baseGround
+}
+
+interface WaterPool { left: number; right: number; level: number; floorY: number; fillPath: Path2D }
+let waterPools: WaterPool[] = []
+
+// Fixed visual falloff depth for the water gradient — not tied to actual
+// terrain depth, which can vary wildly (and isn't meaningful once the pool
+// can sit over a cliff edge).
+const WATER_GRADIENT_DEPTH = 80
+
+// Flood-fill bounds only change when the course does, so this is rebuilt here
+// (and in updateCourse) instead of every animation frame inside drawWater().
+// The fill's bottom edge is a flat rectangle down to worldH rather than a
+// hand-traced terrain curve: the ground is already solid-filled down to
+// worldH everywhere, so a flat bottom hides it just as well — and unlike a
+// traced curve, it can't self-intersect into an unfillable shape on steep or
+// overshooting (spline) terrain.
+function rebuildWaterPools() {
+  waterPools = []
+  for (const hz of course.hazards) {
+    if (hz.kind !== 'water' || hz.level == null) continue
+    const bounds = waterPoolBounds(hz.cx, hz.level, tY, course.worldW)
+    if (!bounds) continue
+    const { left, right } = bounds
+    const path = new Path2D()
+    path.rect(left, hz.level, right - left, course.worldH - hz.level)
+    waterPools.push({ left, right, level: hz.level, floorY: hz.level + WATER_GRADIENT_DEPTH, fillPath: path })
+  }
+}
+rebuildWaterPools()
 
 function updateCourse(c: Course) {
   course = c
   builtSegs = buildSegments(c)
+  splineCoeffs = buildSpline(c.controlPoints)
+  rebuildWaterPools()
 }
 
 // ---- DOM setup ----
@@ -75,37 +112,22 @@ zoomText.textContent = 'zoom'
 sliderRowEl.append(zoomText, zoomSlider, zoomLabel)
 document.body.appendChild(sliderRowEl)
 
-// ---- Hazards ----
-type HazardKind = 'sand' | 'water' | 'tree'
-interface Hazard { kind: HazardKind; cx: number; w: number; h: number }
-const hazards: Hazard[] = [
-  { kind: 'sand',  cx:  900, w: 180, h: 14 },
-  { kind: 'water', cx: 2050, w: 210, h: 60 },
-  { kind: 'sand',  cx: 3150, w: 160, h: 14 },
-]
-
 // ---- Cutouts ----
+// Only the hole gaps the terrain (it's a real pit the ball drops through). Water
+// doesn't carve a notch — it's drawn as a flood-filled pool on top of the
+// natural, un-gapped terrain (see drawWater), so a trap can straddle any slope
+// or peak without leaving stray wall lines or a hidden hole in the ground.
 interface Cutout {
-  kind: 'hole' | 'water'
+  kind: 'hole'
   left: number; right: number
   leftTopY: number; rightTopY: number
   floorY: number
-  waterY?: number
 }
 
 function buildCutouts(): Cutout[] {
-  const cuts: Cutout[] = []
   const hL = course.holeX - HOLE_W / 2, hR = course.holeX + HOLE_W / 2
-  cuts.push({ kind: 'hole', left: hL, right: hR,
-    leftTopY: tY(hL), rightTopY: tY(hR), floorY: tY(course.holeX) + HOLE_D })
-  for (const hz of hazards) {
-    if (hz.kind !== 'water') continue
-    const left = hz.cx - hz.w / 2, right = hz.cx + hz.w / 2
-    const lty = tY(left), rty = tY(right)
-    const waterY = Math.max(lty, rty)
-    cuts.push({ kind: 'water', left, right, leftTopY: lty, rightTopY: rty, floorY: waterY + hz.h, waterY })
-  }
-  return cuts.sort((a, b) => a.left - b.left)
+  return [{ kind: 'hole', left: hL, right: hR,
+    leftTopY: tY(hL), rightTopY: tY(hR), floorY: tY(course.holeX) + HOLE_D }]
 }
 
 function addTerrainPath(cuts: Cutout[]) {
@@ -113,24 +135,37 @@ function addTerrainPath(cuts: Cutout[]) {
   let wx = 20
   for (const cut of cuts) {
     while (wx < cut.left) { ctx.lineTo(wx, tY(wx)); wx += 20 }
-    const r = cut.kind === 'water' ? 10 : 0
-    if (r === 0) {
-      ctx.lineTo(cut.left,  cut.leftTopY); ctx.lineTo(cut.left,  cut.floorY)
-      ctx.lineTo(cut.right, cut.floorY);   ctx.lineTo(cut.right, cut.rightTopY)
-    } else {
-      ctx.arcTo(cut.left,  cut.leftTopY,  cut.left,       cut.floorY,         r)
-      ctx.arcTo(cut.left,  cut.floorY,    cut.right,      cut.floorY,         r)
-      ctx.arcTo(cut.right, cut.floorY,    cut.right,      cut.rightTopY,      r)
-      ctx.lineTo(cut.right, cut.rightTopY + r)
-      ctx.arcTo(cut.right, cut.rightTopY, cut.right + 20, tY(cut.right + 20), r)
-    }
+    ctx.lineTo(cut.left,  cut.leftTopY); ctx.lineTo(cut.left,  cut.floorY)
+    ctx.lineTo(cut.right, cut.floorY);   ctx.lineTo(cut.right, cut.rightTopY)
     wx = Math.ceil(cut.right / 20) * 20
   }
   while (wx <= course.worldW) { ctx.lineTo(wx, tY(wx)); wx += 20 }
 }
 
+// Draw each water trap as a flood-filled pool: it floods outward from the
+// trap's anchor (`cx`) until the terrain rises above `level`, then fills the
+// gap between that surface line and the real terrain curve underneath it.
+// Because terrain is NOT gapped, anywhere the ground rises above the surface
+// (e.g. a peak the trap straddles) shows through as a shore rising out of the
+// pool, which is exactly what we want.
+function drawWater() {
+  const th = course.theme
+  for (const { left, right, level: wy, floorY, fillPath } of waterPools) {
+    const g = ctx.createLinearGradient(0, wy, 0, floorY)
+    g.addColorStop(0, hexWithAlpha(th.waterFill, 0.92)); g.addColorStop(1, hexWithAlpha(th.waterFill, 0.97))
+    ctx.fillStyle = g; ctx.fill(fillPath)
+    const w = right - left
+    ctx.strokeStyle = hexWithAlpha(th.waterLine, 0.70); ctx.lineWidth = th.waterLineW
+    ctx.beginPath(); ctx.moveTo(left, wy); ctx.lineTo(right, wy); ctx.stroke()
+    ctx.strokeStyle = hexWithAlpha(th.waterLine, 0.30); ctx.lineWidth = 1; ctx.beginPath()
+    ctx.moveTo(left + w * 0.08, wy + 7); ctx.lineTo(left + w * 0.50, wy + 7)
+    ctx.moveTo(left + w * 0.44, wy + 14); ctx.lineTo(left + w * 0.86, wy + 14)
+    ctx.stroke()
+  }
+}
+
 function drawHazards() {
-  for (const hz of hazards) {
+  for (const hz of course.hazards) {
     if (hz.kind === 'water') continue
     const ty = tY(hz.cx)
     if (hz.kind === 'sand') {
@@ -166,6 +201,78 @@ function worldToScreen(wx: number, wy: number) {
 }
 function powerColor(ratio: number) { return `hsl(${240 - ratio * 240}, 90%, 55%)` }
 
+function drawSunAndMountains() {
+  const th = course.theme
+  const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
+
+  // Sun — position formula maps to a fixed screen position (upper-right) at any cam/zoom.
+  // ss uses /zoom so the screen-space radius stays constant regardless of zoom level.
+  const sunX = camX + visW * 0.80, sunY = camY + visH * 0.17
+  const ss = th.sunSize / zoom
+
+  // Draw back to front: ring2 circle, ring1 circle, core — each smaller circle covers the center.
+  ctx.beginPath(); ctx.arc(sunX, sunY, ss * 2, 0, Math.PI * 2)
+  ctx.fillStyle = th.sunRing2; ctx.fill()
+
+  ctx.beginPath(); ctx.arc(sunX, sunY, ss * 1.5, 0, Math.PI * 2)
+  ctx.fillStyle = th.sunRing1; ctx.fill()
+
+  ctx.beginPath(); ctx.arc(sunX, sunY, ss, 0, Math.PI * 2)
+  ctx.fillStyle = th.sunColor; ctx.fill()
+
+  // Mountain height formula — uses incommensurate periods so peaks look irregular/non-repeating.
+  // pow(|sin|, 0.6) sharpens peaks slightly without overcomplicating the math.
+  function mtnHeight1(wx: number): number {
+    return Math.pow(Math.abs(Math.sin(wx / 613 + 0.00)), 0.55) * 180
+         + Math.pow(Math.abs(Math.sin(wx / 379 + 1.83)), 0.70) * 90
+         + Math.abs(Math.sin(wx / 131 + 2.40)) * 28
+         + Math.abs(Math.sin(wx / 59  + 0.91)) * 10
+  }
+  function mtnHeight2(wx: number): number {
+    return Math.pow(Math.abs(Math.sin(wx / 431 + 0.60)), 0.50) * 130
+         + Math.pow(Math.abs(Math.sin(wx / 251 + 1.10)), 0.65) * 55
+         + Math.abs(Math.sin(wx / 89  + 2.90)) * 18
+  }
+
+  // Back mountains — p=0.06: moves at 6% of terrain speed (very far)
+  const p1 = 0.06
+  const m1Shift = camX * (1 - p1)
+  const m1EffStart = camX * p1 - 20
+  const m1EffEnd   = camX * p1 + visW + 20
+  const baseY1 = th.mountain1Y * course.worldH
+  ctx.fillStyle = th.mountain1
+  ctx.beginPath()
+  let firstM1 = true
+  for (let ex = m1EffStart; ex <= m1EffEnd; ex += 6) {
+    const wx = ex + m1Shift
+    const my = baseY1 - mtnHeight1(wx)
+    firstM1 ? ctx.moveTo(wx, my) : ctx.lineTo(wx, my)
+    firstM1 = false
+  }
+  ctx.lineTo(m1EffEnd + m1Shift, course.worldH)
+  ctx.lineTo(m1EffStart + m1Shift, course.worldH)
+  ctx.closePath(); ctx.fill()
+
+  // Front mountains — p=0.22: moves at 22% of terrain speed (mid distance)
+  const p2 = 0.22
+  const m2Shift = camX * (1 - p2)
+  const m2EffStart = camX * p2 - 20
+  const m2EffEnd   = camX * p2 + visW + 20
+  const baseY2 = th.mountain2Y * course.worldH
+  ctx.fillStyle = th.mountain2
+  ctx.beginPath()
+  let firstM2 = true
+  for (let ex = m2EffStart; ex <= m2EffEnd; ex += 6) {
+    const wx = ex + m2Shift
+    const my = baseY2 - mtnHeight2(wx)
+    firstM2 ? ctx.moveTo(wx, my) : ctx.lineTo(wx, my)
+    firstM2 = false
+  }
+  ctx.lineTo(m2EffEnd + m2Shift, course.worldH)
+  ctx.lineTo(m2EffStart + m2Shift, course.worldH)
+  ctx.closePath(); ctx.fill()
+}
+
 // ---- Minimap ----
 const MINI_X = 8, MINI_Y = 8, MINI_W = 200, MINI_H = 50
 
@@ -184,10 +291,10 @@ function drawMinimap() {
   }
   ctx.stroke()
 
-  for (const cut of buildCutouts()) {
-    if (cut.kind !== 'water') continue
-    const mx = mwx(cut.left), my = mwy(cut.waterY!)
-    const mw = mwx(cut.right) - mx, mh = Math.max(mwy(cut.floorY) - my, 2)
+  for (const pool of waterPools) {
+    const mx = mwx(pool.left), my = mwy(pool.level)
+    const mw = mwx(pool.right) - mx
+    const mh = Math.max(mwy(pool.floorY) - my, 2)
     ctx.fillStyle = 'rgba(22,85,225,0.75)'; ctx.beginPath()
     ctx.roundRect(mx, my, mw, mh, 1); ctx.fill()
   }
@@ -220,17 +327,27 @@ function draw() {
   ctx.rect(0, 0, course.worldW, course.worldH)
   ctx.clip()
 
-  // Sky inside world
-  const sky = ctx.createLinearGradient(0, 0, 0, course.worldH)
-  sky.addColorStop(0, '#07071a'); sky.addColorStop(1, '#111125')
+  // Sky — gradient spans the visible viewport so it stays screen-fixed regardless of pan/zoom.
+  const sky = ctx.createLinearGradient(0, camY, 0, camY + CANVAS_H / zoom)
+  sky.addColorStop(0, course.theme.skyTop); sky.addColorStop(1, course.theme.skyBottom)
   ctx.fillStyle = sky
   ctx.fillRect(0, 0, course.worldW, course.worldH)
+
+  drawSunAndMountains()
+
+  // Water is drawn before the ground, as a plain rectangle — the ground fill
+  // (opaque all the way down to worldH) then paints over whatever part of
+  // that rectangle sits above the real terrain. That gives a shoreline that
+  // exactly follows the terrain's actual contour for free, without the water
+  // code needing to trace it, and without a fixed-width pool ever drawing a
+  // hard, unnaturally straight edge into a slope.
+  drawWater()
 
   const cuts = buildCutouts()
 
   ctx.beginPath(); addTerrainPath(cuts)
   ctx.lineTo(course.worldW, course.worldH); ctx.lineTo(0, course.worldH); ctx.closePath()
-  ctx.fillStyle = '#252515'; ctx.fill()
+  ctx.fillStyle = course.theme.groundFill; ctx.fill()
 
   for (const cut of cuts) {
     const topY = Math.min(cut.leftTopY, cut.rightTopY), w = cut.right - cut.left
@@ -238,23 +355,11 @@ function draw() {
       const g = ctx.createLinearGradient(0, topY, 0, cut.floorY)
       g.addColorStop(0, '#0c0c14'); g.addColorStop(1, '#040406')
       ctx.fillStyle = g; ctx.fillRect(cut.left, topY, w, cut.floorY - topY)
-    } else if (cut.kind === 'water') {
-      const CORNER_R = 10, wy = cut.waterY! + CORNER_R
-      const g = ctx.createLinearGradient(0, wy, 0, cut.floorY)
-      g.addColorStop(0, 'rgba(22,85,225,0.92)'); g.addColorStop(1, 'rgba(8,40,140,0.97)')
-      const r = Math.min(CORNER_R, (cut.floorY - wy) / 2.5, w / 4)
-      ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect(cut.left, wy, w, cut.floorY - wy, [0, 0, r, r]); ctx.fill()
-      ctx.strokeStyle = 'rgba(150,210,255,0.70)'; ctx.lineWidth = 1.5
-      ctx.beginPath(); ctx.moveTo(cut.left, wy); ctx.lineTo(cut.right, wy); ctx.stroke()
-      ctx.strokeStyle = 'rgba(190,230,255,0.30)'; ctx.lineWidth = 1; ctx.beginPath()
-      ctx.moveTo(cut.left + w * 0.08, wy + 7); ctx.lineTo(cut.left + w * 0.50, wy + 7)
-      ctx.moveTo(cut.left + w * 0.44, wy + 14); ctx.lineTo(cut.left + w * 0.86, wy + 14)
-      ctx.stroke()
     }
   }
 
   ctx.beginPath(); addTerrainPath(cuts)
-  ctx.strokeStyle = '#667755'; ctx.lineWidth = 2; ctx.stroke()
+  ctx.strokeStyle = course.theme.groundLine; ctx.lineWidth = course.theme.groundLineW; ctx.stroke()
 
   // World boundary — box only, not tic-tac-toe
   ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 6 / zoom
@@ -415,6 +520,13 @@ canvas.addEventListener('mousedown', (e) => {
 // ---- WebSocket ----
 const ws = new WebSocket('ws://localhost:8080/ws')
 
+// The server starts on its own default course and only learns about a
+// different one (e.g. restored from localStorage below) via this message —
+// without it the server keeps simulating the old terrain after a reload,
+// which is what made the ball spawn underground until something nudged the
+// editor into sending a course update.
+ws.onopen = () => { ws.send(JSON.stringify({ type: 'course', data: course })) }
+
 ws.onmessage = (e) => {
   const { x, y, resting, inHole, inWater } = JSON.parse(e.data)
   physBallX = x; physBallY = y
@@ -470,12 +582,33 @@ const editor = initEditor({
 
 editorBtn.addEventListener('click', () => editor.show())
 
+// ---- Dev shortcuts ----
+document.addEventListener('keydown', (e) => {
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+  if (e.key === 'r' || e.key === 'R') ws.send(JSON.stringify({ type: 'reset', tee: 'back' }))
+  else if (e.key === 't' || e.key === 'T') ws.send(JSON.stringify({ type: 'reset', tee: 'forward' }))
+  else if (e.key === 'e' || e.key === 'E') {
+    ws.send(JSON.stringify({ type: 'skipTimer' }))
+    shotAllowedAt = 0
+    trulyResting = true
+    inWaterPenalty = false
+    inWaterSinking = false
+    showingHole = false
+  }
+})
+
 // Restore saved course from localStorage on startup.
 // Merge with DEFAULT_COURSE so any fields added since the save don't end up undefined.
 const saved = localStorage.getItem('golf01_course')
 if (saved) {
-  try { updateCourse({ ...DEFAULT_COURSE, ...JSON.parse(saved) }) } catch { /* ignore bad JSON */ }
+  try {
+    const parsed = JSON.parse(saved)
+    updateCourse({
+      ...DEFAULT_COURSE,
+      ...parsed,
+      controlPoints: parsed.controlPoints ?? DEFAULT_COURSE.controlPoints,
+      theme: { ...DEFAULT_COURSE.theme, ...(parsed.theme ?? {}) },
+    })
+  } catch { /* ignore bad JSON */ }
 }
 
-// Suppress unused-variable TS warning (tSlope is used only implicitly via the exported signature)
-void tSlope

@@ -13,7 +13,17 @@
       "Bash(go build *)",
       "Bash(go test *)",
       "Bash(npx tsc *)",
-      "Bash(git -C /Users/erikinterval/dev/ts/golf01 rm -rf --cached golfracer)"
+      "Bash(git -C /Users/erikinterval/dev/ts/golf01 rm -rf --cached golfracer)",
+      "Bash(lsof -nP -iTCP -sTCP:LISTEN)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:5173/)",
+      "Bash(ls /Users/erikinterval/.nvm/versions/node/v24.11.1/lib/node_modules/ 2>/dev/null)",
+      "Read(//Users/erikinterval/.nvm/versions/node/v24.11.1/lib/node_modules/**)",
+      "Bash(npm init *)",
+      "Bash(npm install *)",
+      "Bash(node drive2.mjs)",
+      "Bash(node drive3.mjs)",
+      "Bash(node /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/bc1a4078-dc11-4d4f-bf2d-8b6e8c249485/scratchpad/repro.mjs)",
+      "Bash(node -e ' *)"
     ]
   }
 }
