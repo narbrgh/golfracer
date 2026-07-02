@@ -1,6 +1,7 @@
-import { buildSegments, terrainY, DEFAULT_COURSE, hexWithAlpha, buildSpline, splineY, waterPoolBounds, ensureCW } from './terrain'
-import type { Course, BuiltSegment, SplineCoeff, Platform } from './terrain'
+import { buildSegments, terrainY, hexWithAlpha, buildSpline, splineY, waterPoolBounds, ensureCW } from './terrain'
+import type { Course, Hole, BuiltSegment, SplineCoeff, Platform } from './terrain'
 import { initEditor } from './editor'
+import { listCourses, getCourse, newCourse } from './courseapi'
 
 // ---- Canvas / render constants ----
 const CANVAS_W = 800
@@ -17,17 +18,23 @@ const BALL_LERP       = 0.85
 const REST_DEBOUNCE_MS = 250
 const SHOT_DELAY_MS    = 2500
 
-// ---- Course state (mutable when editor pushes a new course) ----
-let course: Course = DEFAULT_COURSE
-let builtSegs: BuiltSegment[] = buildSegments(course)
-let splineCoeffs: SplineCoeff[] = buildSpline(course.controlPoints)
+// ---- Course state ----
+// courseData is the whole multi-hole course (the unit saved on the server);
+// `hole` is the active hole that rendering and the terrain caches below are
+// built from; activeHole indexes into courseData.holes. Replaced at startup by
+// the course loaded from the server (see loadInitialCourse).
+let courseData: Course = newCourse('untitled', 'Untitled')
+let activeHole = 0
+let hole: Hole = courseData.holes[activeHole]
+let builtSegs: BuiltSegment[] = buildSegments(hole)
+let splineCoeffs: SplineCoeff[] = buildSpline(hole.controlPoints)
 
 function tY(x: number): number {
-  const s = course.useSpline, w = course.useWaves
-  if (s && w) return splineY(x, splineCoeffs) + terrainY(x, builtSegs) - course.baseGround
+  const s = hole.useSpline, w = hole.useWaves
+  if (s && w) return splineY(x, splineCoeffs) + terrainY(x, builtSegs) - hole.baseGround
   if (s)      return splineY(x, splineCoeffs)
   if (w)      return terrainY(x, builtSegs)
-  return course.baseGround
+  return hole.baseGround
 }
 
 interface WaterPool { left: number; right: number; level: number; floorY: number; fillPath: Path2D }
@@ -38,7 +45,7 @@ let waterPools: WaterPool[] = []
 // can sit over a cliff edge).
 const WATER_GRADIENT_DEPTH = 80
 
-// Flood-fill bounds only change when the course does, so this is rebuilt here
+// Flood-fill bounds only change when the hole does, so this is rebuilt here
 // (and in updateCourse) instead of every animation frame inside drawWater().
 // The fill's bottom edge is a flat rectangle down to worldH rather than a
 // hand-traced terrain curve: the ground is already solid-filled down to
@@ -47,20 +54,20 @@ const WATER_GRADIENT_DEPTH = 80
 // overshooting (spline) terrain.
 function rebuildWaterPools() {
   waterPools = []
-  for (const hz of course.hazards) {
+  for (const hz of hole.hazards) {
     if (hz.kind !== 'water' || hz.level == null) continue
-    const bounds = waterPoolBounds(hz.cx, hz.level, tY, course.worldW)
+    const bounds = waterPoolBounds(hz.cx, hz.level, tY, hole.worldW)
     if (!bounds) continue
     const { left, right } = bounds
     const path = new Path2D()
-    path.rect(left, hz.level, right - left, course.worldH - hz.level)
+    path.rect(left, hz.level, right - left, hole.worldH - hz.level)
     waterPools.push({ left, right, level: hz.level, floorY: hz.level + WATER_GRADIENT_DEPTH, fillPath: path })
   }
 }
 rebuildWaterPools()
 
 // ---- Bunker pool cache ----
-// Like water pools: rebuilt once per course change, not every frame.
+// Like water pools: rebuilt once per hole change, not every frame.
 // Fill path = Catmull-Rom spline top → terrain surface back (closed).
 const BUNKER_FILL   = 'rgba(210,185,100,0.88)'
 const BUNKER_STROKE = 'rgba(155,130,40,0.9)'
@@ -74,7 +81,7 @@ let bunkerPools: BunkerPool[] = []
 
 function rebuildBunkerPools() {
   bunkerPools = []
-  for (const b of course.bunkers) {
+  for (const b of hole.bunkers) {
     if (b.topEdge.length < 2) continue
     const coeffs = buildSpline(b.topEdge)
     const leftX  = Math.min(...b.topEdge.map(p => p.x))
@@ -84,8 +91,8 @@ function rebuildBunkerPools() {
     fill.moveTo(leftX, splineY(leftX, coeffs))
     for (let x = leftX + 5; x < rightX; x += 5) fill.lineTo(x, splineY(x, coeffs))
     fill.lineTo(rightX, splineY(rightX, coeffs))
-    fill.lineTo(rightX, course.worldH)
-    fill.lineTo(leftX,  course.worldH)
+    fill.lineTo(rightX, hole.worldH)
+    fill.lineTo(leftX,  hole.worldH)
     fill.closePath()
 
     // Rim stroke is just the spline — terrain drawn on top covers underground parts.
@@ -98,12 +105,23 @@ function rebuildBunkerPools() {
 }
 rebuildBunkerPools()
 
-function updateCourse(c: Course) {
-  course = c
-  builtSegs = buildSegments(c)
-  splineCoeffs = buildSpline(c.controlPoints)
+// updateHole makes h the active hole for rendering and rebuilds the derived
+// terrain/water/bunker caches from it.
+function updateHole(h: Hole) {
+  hole = h
+  builtSegs = buildSegments(h)
+  splineCoeffs = buildSpline(h.controlPoints)
   rebuildWaterPools()
   rebuildBunkerPools()
+}
+
+// sendActiveCourse pushes the whole course + active hole index to the server for
+// live preview/play (server rebuilds physics for that hole). No-op if the socket
+// isn't open yet; loadInitialCourse and ws.onopen both call it.
+function sendActiveCourse() {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'course', data: courseData, hole: activeHole }))
+  }
 }
 
 // ---- DOM setup ----
@@ -165,9 +183,9 @@ interface Cutout {
 }
 
 function buildCutouts(): Cutout[] {
-  const hL = course.holeX - HOLE_W / 2, hR = course.holeX + HOLE_W / 2
+  const hL = hole.holeX - HOLE_W / 2, hR = hole.holeX + HOLE_W / 2
   return [{ kind: 'hole', left: hL, right: hR,
-    leftTopY: tY(hL), rightTopY: tY(hR), floorY: tY(course.holeX) + HOLE_D }]
+    leftTopY: tY(hL), rightTopY: tY(hR), floorY: tY(hole.holeX) + HOLE_D }]
 }
 
 function addTerrainPath(cuts: Cutout[]) {
@@ -179,7 +197,7 @@ function addTerrainPath(cuts: Cutout[]) {
     ctx.lineTo(cut.right, cut.floorY);   ctx.lineTo(cut.right, cut.rightTopY)
     wx = Math.ceil(cut.right / 20) * 20
   }
-  while (wx <= course.worldW) { ctx.lineTo(wx, tY(wx)); wx += 20 }
+  while (wx <= hole.worldW) { ctx.lineTo(wx, tY(wx)); wx += 20 }
 }
 
 // Draw each water trap as a flood-filled pool: it floods outward from the
@@ -189,7 +207,7 @@ function addTerrainPath(cuts: Cutout[]) {
 // (e.g. a peak the trap straddles) shows through as a shore rising out of the
 // pool, which is exactly what we want.
 function drawWater() {
-  const th = course.theme
+  const th = hole.theme
   for (const { left, right, level: wy, floorY, fillPath } of waterPools) {
     const g = ctx.createLinearGradient(0, wy, 0, floorY)
     g.addColorStop(0, hexWithAlpha(th.waterFill, 0.92)); g.addColorStop(1, hexWithAlpha(th.waterFill, 0.97))
@@ -212,7 +230,7 @@ function drawBunkers() {
 }
 
 function drawPlatforms(which: Platform['zOrder']) {
-  for (const plat of course.platforms) {
+  for (const plat of hole.platforms) {
     if (plat.zOrder !== which || plat.points.length < 3) continue
     const pts = ensureCW(plat.points)
     ctx.beginPath()
@@ -225,7 +243,7 @@ function drawPlatforms(which: Platform['zOrder']) {
 }
 
 function drawHazards() {
-  for (const hz of course.hazards) {
+  for (const hz of hole.hazards) {
     if (hz.kind !== 'tree') continue  // only trees remain (sand replaced by bunkers, water handled separately)
     const ty = tY(hz.cx)
     ctx.fillStyle = '#5a3510'; ctx.fillRect(hz.cx - 4, ty - hz.h, 8, hz.h)
@@ -235,8 +253,8 @@ function drawHazards() {
 }
 
 // ---- State ----
-let physBallX = course.teeBackX
-let physBallY = tY(course.teeBackX) - TEE_H - BALL_RADIUS
+let physBallX = hole.teeBackX
+let physBallY = tY(hole.teeBackX) - TEE_H - BALL_RADIUS
 let ballX = physBallX, ballY = physBallY
 let prevResting = true
 let cameraMode: 'follow' | 'free' = 'free'
@@ -247,8 +265,8 @@ let inWaterPenalty = false, inWaterSinking = false, waterSinkStartMs = 0
 
 function canShootNow() { return trulyResting && Date.now() >= shotAllowedAt }
 
-let camX = Math.max(0, Math.min(ballX - CANVAS_W / 2, course.worldW - CANVAS_W))
-let camY = Math.max(0, Math.min(ballY - CANVAS_H * 0.65, course.worldH - CANVAS_H))
+let camX = Math.max(0, Math.min(ballX - CANVAS_W / 2, hole.worldW - CANVAS_W))
+let camY = Math.max(0, Math.min(ballY - CANVAS_H * 0.65, hole.worldH - CANVAS_H))
 let zoom = 1.0, dragging = false, dragX = 0, dragY = 0
 
 function worldToScreen(wx: number, wy: number) {
@@ -257,7 +275,7 @@ function worldToScreen(wx: number, wy: number) {
 function powerColor(ratio: number) { return `hsl(${240 - ratio * 240}, 90%, 55%)` }
 
 function drawSunAndMountains() {
-  const th = course.theme
+  const th = hole.theme
   const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
 
   // Sun — position formula maps to a fixed screen position (upper-right) at any cam/zoom.
@@ -294,7 +312,7 @@ function drawSunAndMountains() {
   const m1Shift = camX * (1 - p1)
   const m1EffStart = camX * p1 - 20
   const m1EffEnd   = camX * p1 + visW + 20
-  const baseY1 = th.mountain1Y * course.worldH
+  const baseY1 = th.mountain1Y * hole.worldH
   ctx.fillStyle = th.mountain1
   ctx.beginPath()
   let firstM1 = true
@@ -304,8 +322,8 @@ function drawSunAndMountains() {
     firstM1 ? ctx.moveTo(wx, my) : ctx.lineTo(wx, my)
     firstM1 = false
   }
-  ctx.lineTo(m1EffEnd + m1Shift, course.worldH)
-  ctx.lineTo(m1EffStart + m1Shift, course.worldH)
+  ctx.lineTo(m1EffEnd + m1Shift, hole.worldH)
+  ctx.lineTo(m1EffStart + m1Shift, hole.worldH)
   ctx.closePath(); ctx.fill()
 
   // Front mountains — p=0.22: moves at 22% of terrain speed (mid distance)
@@ -313,7 +331,7 @@ function drawSunAndMountains() {
   const m2Shift = camX * (1 - p2)
   const m2EffStart = camX * p2 - 20
   const m2EffEnd   = camX * p2 + visW + 20
-  const baseY2 = th.mountain2Y * course.worldH
+  const baseY2 = th.mountain2Y * hole.worldH
   ctx.fillStyle = th.mountain2
   ctx.beginPath()
   let firstM2 = true
@@ -323,8 +341,8 @@ function drawSunAndMountains() {
     firstM2 ? ctx.moveTo(wx, my) : ctx.lineTo(wx, my)
     firstM2 = false
   }
-  ctx.lineTo(m2EffEnd + m2Shift, course.worldH)
-  ctx.lineTo(m2EffStart + m2Shift, course.worldH)
+  ctx.lineTo(m2EffEnd + m2Shift, hole.worldH)
+  ctx.lineTo(m2EffStart + m2Shift, hole.worldH)
   ctx.closePath(); ctx.fill()
 }
 
@@ -337,11 +355,11 @@ function drawMinimap() {
   ctx.strokeStyle = '#444'; ctx.lineWidth = 1
   ctx.strokeRect(MINI_X, MINI_Y, MINI_W, MINI_H)
 
-  const mwx = (wx: number) => MINI_X + (wx / course.worldW) * MINI_W
-  const mwy = (wy: number) => MINI_Y + (wy / course.worldH) * MINI_H
+  const mwx = (wx: number) => MINI_X + (wx / hole.worldW) * MINI_W
+  const mwy = (wy: number) => MINI_Y + (wy / hole.worldH) * MINI_H
 
   ctx.strokeStyle = '#556644'; ctx.lineWidth = 1; ctx.beginPath()
-  for (let wx = 0; wx <= course.worldW; wx += 60) {
+  for (let wx = 0; wx <= hole.worldW; wx += 60) {
     wx === 0 ? ctx.moveTo(mwx(wx), mwy(tY(wx))) : ctx.lineTo(mwx(wx), mwy(tY(wx)))
   }
   ctx.stroke()
@@ -356,13 +374,13 @@ function drawMinimap() {
 
   const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
   const rectX = mwx(camX), rectY = mwy(camY)
-  const rectW = (visW / course.worldW) * MINI_W, rectH = (visH / course.worldH) * MINI_H
+  const rectW = (visW / hole.worldW) * MINI_W, rectH = (visH / hole.worldH) * MINI_H
   ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.fillRect(rectX, rectY, rectW, rectH)
   ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1
   ctx.strokeRect(rectX, rectY, rectW, rectH)
 
   ctx.fillStyle = '#e44'; ctx.beginPath()
-  ctx.arc(mwx(course.holeX), mwy(tY(course.holeX)), 3, 0, Math.PI * 2); ctx.fill()
+  ctx.arc(mwx(hole.holeX), mwy(tY(hole.holeX)), 3, 0, Math.PI * 2); ctx.fill()
   ctx.fillStyle = '#fff'; ctx.beginPath()
   ctx.arc(mwx(ballX), mwy(ballY), 3, 0, Math.PI * 2); ctx.fill()
 }
@@ -379,14 +397,14 @@ function draw() {
 
   // Clip everything to the world rectangle — nothing renders outside world bounds
   ctx.beginPath()
-  ctx.rect(0, 0, course.worldW, course.worldH)
+  ctx.rect(0, 0, hole.worldW, hole.worldH)
   ctx.clip()
 
   // Sky — gradient spans the visible viewport so it stays screen-fixed regardless of pan/zoom.
   const sky = ctx.createLinearGradient(0, camY, 0, camY + CANVAS_H / zoom)
-  sky.addColorStop(0, course.theme.skyTop); sky.addColorStop(1, course.theme.skyBottom)
+  sky.addColorStop(0, hole.theme.skyTop); sky.addColorStop(1, hole.theme.skyBottom)
   ctx.fillStyle = sky
-  ctx.fillRect(0, 0, course.worldW, course.worldH)
+  ctx.fillRect(0, 0, hole.worldW, hole.worldH)
 
   drawSunAndMountains()
   drawPlatforms('back')
@@ -405,8 +423,8 @@ function draw() {
   const cuts = buildCutouts()
 
   ctx.beginPath(); addTerrainPath(cuts)
-  ctx.lineTo(course.worldW, course.worldH); ctx.lineTo(0, course.worldH); ctx.closePath()
-  ctx.fillStyle = course.theme.groundFill; ctx.fill()
+  ctx.lineTo(hole.worldW, hole.worldH); ctx.lineTo(0, hole.worldH); ctx.closePath()
+  ctx.fillStyle = hole.theme.groundFill; ctx.fill()
 
   for (const cut of cuts) {
     const topY = Math.min(cut.leftTopY, cut.rightTopY), w = cut.right - cut.left
@@ -418,19 +436,19 @@ function draw() {
   }
 
   ctx.beginPath(); addTerrainPath(cuts)
-  ctx.strokeStyle = course.theme.groundLine; ctx.lineWidth = course.theme.groundLineW; ctx.stroke()
+  ctx.strokeStyle = hole.theme.groundLine; ctx.lineWidth = hole.theme.groundLineW; ctx.stroke()
 
   // World boundary — box only, not tic-tac-toe
   ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 6 / zoom
-  ctx.strokeRect(0, 0, course.worldW, course.worldH)
+  ctx.strokeRect(0, 0, hole.worldW, hole.worldH)
 
   ctx.fillStyle = '#ffffff'
-  for (const tx of [course.teeBackX, course.teeForwardX]) ctx.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
+  for (const tx of [hole.teeBackX, hole.teeForwardX]) ctx.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
 
   drawPlatforms('front')
   drawHazards()
 
-  const flagBaseX = course.holeX + HOLE_W / 2, flagBaseY = tY(course.holeX + HOLE_W / 2)
+  const flagBaseX = hole.holeX + HOLE_W / 2, flagBaseY = tY(hole.holeX + HOLE_W / 2)
   ctx.strokeStyle = '#bbb'; ctx.lineWidth = 2; ctx.beginPath()
   ctx.moveTo(flagBaseX, flagBaseY); ctx.lineTo(flagBaseX, flagBaseY - 55); ctx.stroke()
   ctx.fillStyle = '#e44'; ctx.beginPath()
@@ -497,7 +515,7 @@ function draw() {
   }
 
   drawMinimap()
-  const holeDist = Math.max(0, Math.round(course.holeX - ballX))
+  const holeDist = Math.max(0, Math.round(hole.holeX - ballX))
   ctx.fillStyle = '#888'; ctx.font = '12px monospace'
   ctx.fillText(`hole: ${holeDist}px`, MINI_X + 2, MINI_Y + MINI_H + 18)
 }
@@ -512,12 +530,12 @@ function tick() {
   }
   if (cameraMode === 'follow') {
     const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
-    const targetCamX = visW >= course.worldW
-      ? (course.worldW - visW) / 2
-      : Math.max(0, Math.min(ballX - visW / 2, course.worldW - visW))
-    const targetCamY = visH >= course.worldH
-      ? (course.worldH - visH) / 2
-      : Math.max(0, Math.min(ballY - visH * 0.65, course.worldH - visH))
+    const targetCamX = visW >= hole.worldW
+      ? (hole.worldW - visW) / 2
+      : Math.max(0, Math.min(ballX - visW / 2, hole.worldW - visW))
+    const targetCamY = visH >= hole.worldH
+      ? (hole.worldH - visH) / 2
+      : Math.max(0, Math.min(ballY - visH * 0.65, hole.worldH - visH))
     camX += (targetCamX - camX) * FOLLOW_CAM_LERP
     camY += (targetCamY - camY) * FOLLOW_CAM_LERP
   }
@@ -532,8 +550,8 @@ canvas.addEventListener('mousedown', (e) => {
 
   if (cameraMode === 'free' && cx >= MINI_X && cx <= MINI_X + MINI_W && cy >= MINI_Y && cy <= MINI_Y + MINI_H) {
     function panTo(px: number, py: number) {
-      const worldX = ((px - MINI_X) / MINI_W) * course.worldW
-      const worldY = ((py - MINI_Y) / MINI_H) * course.worldH
+      const worldX = ((px - MINI_X) / MINI_W) * hole.worldW
+      const worldY = ((py - MINI_Y) / MINI_H) * hole.worldH
       const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
       camX = worldX - visW / 2; camY = worldY - visH / 2
     }
@@ -580,12 +598,11 @@ canvas.addEventListener('mousedown', (e) => {
 // ---- WebSocket ----
 const ws = new WebSocket('ws://localhost:8080/ws')
 
-// The server starts on its own default course and only learns about a
-// different one (e.g. restored from localStorage below) via this message —
-// without it the server keeps simulating the old terrain after a reload,
-// which is what made the ball spawn underground until something nudged the
-// editor into sending a course update.
-ws.onopen = () => { ws.send(JSON.stringify({ type: 'course', data: course })) }
+// The server starts on whichever course it loaded from disk; we push the
+// client's active course on connect so both sides agree on what's being played
+// (without this the server keeps simulating its own terrain after a reload,
+// which made the ball spawn underground until an edit nudged an update).
+ws.onopen = () => { sendActiveCourse() }
 
 ws.onmessage = (e) => {
   const { x, y, resting, inHole, inWater } = JSON.parse(e.data)
@@ -602,8 +619,8 @@ ws.onmessage = (e) => {
     shotAllowedAt = Date.now() + 2 * SHOT_DELAY_MS
     ballX = physBallX; ballY = physBallY
     const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
-    camX = Math.max(0, Math.min(physBallX - visW / 2, course.worldW - visW))
-    camY = Math.max(0, Math.min(physBallY - visH * 0.65, course.worldH - visH))
+    camX = Math.max(0, Math.min(physBallX - visW / 2, hole.worldW - visW))
+    camY = Math.max(0, Math.min(physBallY - visH * 0.65, hole.worldH - visH))
     cameraMode = 'free'
   }
   if (!inWater) { inWaterSinking = false; inWaterPenalty = false; ballX = physBallX; ballY = physBallY }
@@ -614,8 +631,8 @@ ws.onmessage = (e) => {
     if (prevResting) {
       ballX = physBallX; ballY = physBallY
       const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
-      camX = Math.max(0, Math.min(physBallX - visW / 2, course.worldW - visW))
-      camY = Math.max(0, Math.min(physBallY - visH * 0.65, course.worldH - visH))
+      camX = Math.max(0, Math.min(physBallX - visW / 2, hole.worldW - visW))
+      camY = Math.max(0, Math.min(physBallY - visH * 0.65, hole.worldH - visH))
       cameraMode = 'follow'
     }
   } else if (!inHole && !inWater && restingDebounceStart === null) {
@@ -629,14 +646,15 @@ ws.onclose = () => {
 }
 
 // ---- Map editor ----
+// The editor authors the whole course and tells us which hole is active; we
+// mirror that into the render state and push a live preview to the server.
 const editor = initEditor({
-  getCourse: () => course,
-  onCourseChange: (c) => {
-    updateCourse(c)
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'course', data: c }))
-    }
-    localStorage.setItem('golf01_course', JSON.stringify(c))
+  getCourse: () => courseData,
+  onCourseChange: (c, active) => {
+    courseData = c
+    activeHole = active
+    updateHole(c.holes[active] ?? c.holes[0])
+    sendActiveCourse()
   },
 })
 
@@ -657,20 +675,20 @@ document.addEventListener('keydown', (e) => {
   }
 })
 
-// Restore saved course from localStorage on startup.
-// Merge with DEFAULT_COURSE so any fields added since the save don't end up undefined.
-const saved = localStorage.getItem('golf01_course')
-if (saved) {
+// Load the initial course from the server on startup (disk is the source of
+// truth — no localStorage). Falls back to a fresh default course if the server
+// has none yet or is unreachable, so the client still renders something.
+async function loadInitialCourse() {
   try {
-    const parsed = JSON.parse(saved)
-    updateCourse({
-      ...DEFAULT_COURSE,
-      ...parsed,
-      controlPoints: parsed.controlPoints ?? DEFAULT_COURSE.controlPoints,
-      bunkers: parsed.bunkers ?? [],
-      platforms: parsed.platforms ?? [],
-      theme: { ...DEFAULT_COURSE.theme, ...(parsed.theme ?? {}) },
-    })
-  } catch { /* ignore bad JSON */ }
+    const infos = await listCourses()
+    courseData = infos.length > 0 ? await getCourse(infos[0].id) : newCourse('untitled', 'Untitled')
+  } catch (err) {
+    console.warn('course load failed, using default:', err)
+    courseData = newCourse('untitled', 'Untitled')
+  }
+  activeHole = 0
+  updateHole(courseData.holes[activeHole])
+  sendActiveCourse()
 }
+loadInitialCourse()
 

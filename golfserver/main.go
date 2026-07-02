@@ -5,10 +5,12 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golf01/server/coursestore"
 	"golf01/server/physics"
 	"golf01/server/terrain"
 )
@@ -57,12 +59,14 @@ type ballState struct {
 	InWater bool    `json:"inWater,omitempty"`
 }
 
-// clientMsg covers shoot, course-update, reset, and skipTimer messages.
+// clientMsg covers shoot, course (live preview), selectHole, reset, and
+// skipTimer messages.
 type clientMsg struct {
 	Type string          `json:"type"`
 	VX   float64         `json:"vx"`
 	VY   float64         `json:"vy"`
 	Tee  string          `json:"tee"`
+	Hole int             `json:"hole"` // active hole index for "course"/"selectHole"
 	Data json.RawMessage `json:"data"`
 }
 
@@ -79,23 +83,53 @@ type hub struct {
 }
 
 func (h *hub) add(c *websocket.Conn) {
-	h.mu.Lock(); h.clients[c] = struct{}{}; h.mu.Unlock()
+	h.mu.Lock()
+	h.clients[c] = struct{}{}
+	h.mu.Unlock()
 }
 func (h *hub) remove(c *websocket.Conn) {
-	h.mu.Lock(); delete(h.clients, c); h.mu.Unlock(); c.Close()
+	h.mu.Lock()
+	delete(h.clients, c)
+	h.mu.Unlock()
+	c.Close()
 }
 func (h *hub) broadcast(msg []byte) {
-	h.mu.Lock(); defer h.mu.Unlock()
-	for c := range h.clients { c.WriteMessage(websocket.TextMessage, msg) }
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		c.WriteMessage(websocket.TextMessage, msg)
+	}
 }
 
 func main() {
-	// Course and terrain (protected by ballMu, shared between game loop and WS handler)
-	currentCourse := terrain.DefaultCourse()
-	builtSegs := terrain.BuildSegments(currentCourse)
-	splineCoeffs := terrain.BuildSpline(currentCourse.ControlPoints)
+	// Course store: JSON files on disk under courseDir, loaded + migrated on
+	// startup. The store is the source of truth for saved courses; the game loop
+	// plays one hole of the active course at a time.
+	const courseDir = "courses"
+	store, storeErrs := coursestore.Open(courseDir)
+	for _, e := range storeErrs {
+		log.Println("course load error:", e)
+	}
+
+	// Active course + which hole is being played/previewed. `hole` is the single
+	// terrain.Hole all the per-hole geometry below is built from; it is swapped by
+	// setActive whenever the active course or hole index changes. If any courses
+	// exist on disk, start on the first; otherwise fall back to a default course.
+	activeCourse := coursestore.DefaultCourse()
+	if infos := store.List(); len(infos) > 0 {
+		if c, ok := store.Get(infos[0].ID); ok {
+			activeCourse = c
+		}
+	}
+	currentHole := 0
+	hole := activeCourse.Holes[currentHole]
+
+	// Terrain derived from the active hole (protected by ballMu, shared between
+	// game loop and WS handler). Rebuilt by setActive on every hole switch.
+	builtSegs := terrain.BuildSegments(hole)
+	splineCoeffs := terrain.BuildSpline(hole.ControlPoints)
 	cty := func(x float64) float64 {
-		return terrain.ComputeTerrainY(x, currentCourse, builtSegs, splineCoeffs)
+		return terrain.ComputeTerrainY(x, hole, builtSegs, splineCoeffs)
 	}
 	// computeWaterTraps resolves the course's water hazards into pit geometry.
 	// Each trap floods outward from its anchor (hz.CX) until the terrain rises
@@ -106,11 +140,11 @@ func main() {
 	// waterTraps is recomputed whenever the course changes.
 	computeWaterTraps := func() []waterTrap {
 		var traps []waterTrap
-		for _, hz := range currentCourse.Hazards {
+		for _, hz := range hole.Hazards {
 			if hz.Kind != "water" {
 				continue
 			}
-			l, r, ok := terrain.WaterPoolBounds(hz.CX, hz.Level, cty, currentCourse.WorldW)
+			l, r, ok := terrain.WaterPoolBounds(hz.CX, hz.Level, cty, hole.WorldW)
 			if !ok {
 				continue
 			}
@@ -137,8 +171,8 @@ func main() {
 	rebuildEdges := func() {
 		waterTraps = computeWaterTraps()
 		const step = 4.0
-		holeL := currentCourse.HoleX - holeW/2
-		holeR := currentCourse.HoleX + holeW/2
+		holeL := hole.HoleX - holeW/2
+		holeR := hole.HoleX + holeW/2
 		// Only the hole gaps the terrain. Water traps keep solid natural terrain
 		// underneath them — the ball simply gets a water penalty once it crosses
 		// below the pooled surface within a trap's span (see the game loop), which
@@ -154,7 +188,7 @@ func main() {
 			leftX, rightX float64
 		}
 		var bunkerSurfs []bunkerSurf
-		for _, b := range currentCourse.Bunkers {
+		for _, b := range hole.Bunkers {
 			if len(b.TopEdge) < 2 {
 				continue
 			}
@@ -191,10 +225,10 @@ func main() {
 			return
 		}
 
-		edges := make([]physics.Edge, 0, int(currentCourse.WorldW/step)+8)
+		edges := make([]physics.Edge, 0, int(hole.WorldW/step)+8)
 		prevX, prevY, prevSand := 0.0, 0.0, false
 		prevY, prevSand = surfaceAt(0)
-		for x := step; x <= currentCourse.WorldW; x += step {
+		for x := step; x <= hole.WorldW; x += step {
 			y, sand := surfaceAt(x)
 			if !inGap(prevX) && !inGap(x) {
 				if prevSand || sand {
@@ -209,8 +243,8 @@ func main() {
 			y := cty(teeX) - teeH
 			edges = append(edges, physics.NewEdge(teeX-teeHalfW, y, teeX+teeHalfW, y))
 		}
-		addTee(currentCourse.TeeBackX)
-		addTee(currentCourse.TeeForwardX)
+		addTee(hole.TeeBackX)
+		addTee(hole.TeeForwardX)
 
 		// No water wall/floor edges: terrain stays solid under every trap, so the
 		// ball can never tunnel through a pit side or fall forever. It rolls down the
@@ -219,7 +253,7 @@ func main() {
 
 		// Static platform edges. EnsureCW normalises winding so NewEdge outward
 		// normals always point away from the platform interior.
-		for _, plat := range currentCourse.Platforms {
+		for _, plat := range hole.Platforms {
 			if len(plat.Points) < 3 {
 				continue
 			}
@@ -244,7 +278,7 @@ func main() {
 	var builtBunkers []builtBunker
 	rebuildBunkers := func() {
 		builtBunkers = nil
-		for _, b := range currentCourse.Bunkers {
+		for _, b := range hole.Bunkers {
 			if len(b.TopEdge) < 2 {
 				continue
 			}
@@ -263,23 +297,23 @@ func main() {
 	}
 	rebuildBunkers()
 
-	startY := func() float64 { return cty(currentCourse.TeeBackX) - teeH - 10 }
-	ball := physics.NewBall(currentCourse.TeeBackX, startY(), 10)
+	startY := func() float64 { return cty(hole.TeeBackX) - teeH - 10 }
+	ball := physics.NewBall(hole.TeeBackX, startY(), 10)
 
 	var ballMu sync.Mutex
-	inHoleTicks   := 0
-	sinkTicks     := 0
-	sinkEntryX    := 0.0
-	sinkEntryY    := 0.0
-	inWaterTicks  := 0
+	inHoleTicks := 0
+	sinkTicks := 0
+	sinkEntryX := 0.0
+	sinkEntryY := 0.0
+	inWaterTicks := 0
 	penaltyFrozen := false // ball locked at penalty spot until next shot
-	penaltyX      := 0.0
-	penaltyY      := 0.0
-	lastNonWaterX := currentCourse.TeeBackX
+	penaltyX := 0.0
+	penaltyY := 0.0
+	lastNonWaterX := hole.TeeBackX
 
 	// Bunker state: depth is captured as ball.VY at first entry (downward component).
-	inBunker    := false
-	bunkerDepth := 0.0   // 0 = shallow, 1 = deep
+	inBunker := false
+	bunkerDepth := 0.0 // 0 = shallow, 1 = deep
 	activeBunker := builtBunker{}
 
 	// Soft-lock diagnostics: if the ball stays not-resting but confined to a
@@ -295,7 +329,7 @@ func main() {
 			if ball.X < bb.leftX || ball.X > bb.rightX {
 				continue
 			}
-			topY    := terrain.SplineY(ball.X, bb.coeffs)
+			topY := terrain.SplineY(ball.X, bb.coeffs)
 			groundY := cty(ball.X)
 			// In screen coords Y increases downward, so "rim above terrain"
 			// means topY < groundY (smaller Y = higher on screen).
@@ -304,6 +338,30 @@ func main() {
 			}
 		}
 		return false, builtBunker{}
+	}
+
+	// setActive switches the played/previewed hole. It swaps in the new course +
+	// hole index, rebuilds all per-hole terrain/bunker/water geometry, and re-tees
+	// the ball, clearing transient hole state (sink/water/hole animations). Callers
+	// must hold ballMu. Out-of-range indices clamp to hole 0.
+	setActive := func(c coursestore.Course, idx int) {
+		if len(c.Holes) == 0 {
+			return
+		}
+		if idx < 0 || idx >= len(c.Holes) {
+			idx = 0
+		}
+		activeCourse = c
+		currentHole = idx
+		hole = c.Holes[idx]
+		builtSegs = terrain.BuildSegments(hole)
+		splineCoeffs = terrain.BuildSpline(hole.ControlPoints)
+		rebuildBunkers() // must run before rebuildEdges so rim edges use current data
+		rebuildEdges()
+		inHoleTicks, sinkTicks, inWaterTicks, penaltyFrozen = 0, 0, 0, false
+		inBunker, bunkerDepth = false, 0
+		ball = physics.NewBall(hole.TeeBackX, startY(), 10)
+		lastNonWaterX = hole.TeeBackX
 	}
 
 	h := &hub{clients: make(map[*websocket.Conn]struct{})}
@@ -319,7 +377,7 @@ func main() {
 				state = ballState{X: ball.X, Y: ball.Y, Resting: true, InHole: true}
 				inHoleTicks--
 				if inHoleTicks == 0 {
-					ball = physics.NewBall(currentCourse.TeeBackX, startY(), 10)
+					ball = physics.NewBall(hole.TeeBackX, startY(), 10)
 				}
 
 			case sinkTicks > 0:
@@ -377,7 +435,7 @@ func main() {
 						}
 						nearby = append(nearby, e)
 					}
-					ball.Tick(subDt, nearby, 0, currentCourse.WorldW, 0)
+					ball.Tick(subDt, nearby, 0, hole.WorldW, 0)
 
 					// Bunker: the rim is now a real physics surface (edges added in
 					// rebuildEdges), so the ball naturally bounces/rests on it
@@ -419,7 +477,7 @@ func main() {
 						break
 					}
 				}
-				overHole := math.Abs(ball.X-currentCourse.HoleX) <= holeW/2
+				overHole := math.Abs(ball.X-hole.HoleX) <= holeW/2
 
 				if hit != nil {
 					// Drop the penalty ball back on whichever bank the ball came from.
@@ -433,9 +491,9 @@ func main() {
 					ball.VX, ball.VY = 0, 0
 					sinkTicks = sinkTotalTicks
 					state = ballState{X: ball.X, Y: ball.Y, Resting: false, InWater: true}
-				} else if overHole && ball.Y > cty(currentCourse.HoleX) {
-					ball.X = currentCourse.HoleX
-					ball.Y = cty(currentCourse.HoleX) + holeD/2
+				} else if overHole && ball.Y > cty(hole.HoleX) {
+					ball.X = hole.HoleX
+					ball.Y = cty(hole.HoleX) + holeD/2
 					ball.VX, ball.VY = 0, 0
 					ball.Resting = true
 					inHoleTicks = holeHoldTicks
@@ -451,8 +509,10 @@ func main() {
 						if slWinTicks == 0 {
 							slMinX, slMaxX, slMinY, slMaxY = ball.X, ball.X, ball.Y, ball.Y
 						} else {
-							slMinX = math.Min(slMinX, ball.X); slMaxX = math.Max(slMaxX, ball.X)
-							slMinY = math.Min(slMinY, ball.Y); slMaxY = math.Max(slMaxY, ball.Y)
+							slMinX = math.Min(slMinX, ball.X)
+							slMaxX = math.Max(slMaxX, ball.X)
+							slMinY = math.Min(slMinY, ball.Y)
+							slMaxY = math.Max(slMaxY, ball.Y)
 						}
 						slWinTicks++
 						if slWinTicks >= 120 {
@@ -487,7 +547,8 @@ func main() {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Println("upgrade:", err); return
+			log.Println("upgrade:", err)
+			return
 		}
 		h.add(conn)
 		log.Println("client connected:", conn.RemoteAddr())
@@ -511,37 +572,47 @@ func main() {
 					if inBunker {
 						b := activeBunker.b
 						shallow, deep := b.ShallowMult, b.DeepMult
-						if shallow == 0 { shallow = 0.75 }
-						if deep    == 0 { deep    = 0.25 }
+						if shallow == 0 {
+							shallow = 0.75
+						}
+						if deep == 0 {
+							deep = 0.25
+						}
 						mult := shallow + (deep-shallow)*bunkerDepth
-						vx *= mult; vy *= mult
+						vx *= mult
+						vy *= mult
 					}
 					ball.Shoot(vx, vy)
 				}
 				ballMu.Unlock()
 			case "course":
-				var c terrain.Course
-				if json.Unmarshal(msg.Data, &c) == nil && (len(c.Segments) > 0 || len(c.ControlPoints) > 0) {
+				// Live preview push from the editor: the full (possibly unsaved)
+				// course plus which hole to show. Normalized (defaults filled) but
+				// not persisted — Save goes through the HTTP API separately.
+				var c coursestore.Course
+				if json.Unmarshal(msg.Data, &c) == nil && len(c.Holes) > 0 {
+					c = coursestore.Normalize(c)
 					ballMu.Lock()
-					currentCourse = c
-					builtSegs = terrain.BuildSegments(c)
-					splineCoeffs = terrain.BuildSpline(c.ControlPoints)
-					rebuildBunkers()  // must run before rebuildEdges so rim edges use current data
-					rebuildEdges()    // recomputes water traps + bunker rim edges
-					inHoleTicks, sinkTicks, inWaterTicks, penaltyFrozen = 0, 0, 0, false
-					inBunker, bunkerDepth = false, 0
-					ball = physics.NewBall(currentCourse.TeeBackX, startY(), 10)
-					lastNonWaterX = currentCourse.TeeBackX
-					log.Printf("course updated: segments=%d points=%d worldW=%.0f bunkers=%d", len(c.Segments), len(c.ControlPoints), c.WorldW, len(c.Bunkers))
+					setActive(c, msg.Hole)
 					ballMu.Unlock()
+					log.Printf("course preview: id=%q holes=%d activeHole=%d", c.ID, len(c.Holes), msg.Hole)
 				}
+			case "selectHole":
+				// Switch the active hole of the current course without resending
+				// geometry (used for hole navigation).
+				ballMu.Lock()
+				setActive(activeCourse, msg.Hole)
+				ballMu.Unlock()
 			case "reset":
 				ballMu.Lock()
-				inHoleTicks = 0; sinkTicks = 0; inWaterTicks = 0; penaltyFrozen = false
+				inHoleTicks = 0
+				sinkTicks = 0
+				inWaterTicks = 0
+				penaltyFrozen = false
 				inBunker, bunkerDepth = false, 0
-				teeX := currentCourse.TeeBackX
+				teeX := hole.TeeBackX
 				if msg.Tee == "forward" {
-					teeX = currentCourse.TeeForwardX
+					teeX = hole.TeeForwardX
 				}
 				ball = physics.NewBall(teeX, cty(teeX)-teeH-10, 10)
 				lastNonWaterX = teeX
@@ -569,6 +640,72 @@ func main() {
 				}
 				ballMu.Unlock()
 			}
+		}
+	})
+
+	// ---- Course HTTP API (dev-local persistence) ----
+	// The browser editor can't write to disk directly, so it saves/loads courses
+	// through these endpoints. Permissive CORS because the client dev server runs
+	// on a different origin than :8080.
+	writeJSON := func(w http.ResponseWriter, v any) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(v)
+	}
+	cors := func(w http.ResponseWriter) {
+		hdr := w.Header()
+		hdr.Set("Access-Control-Allow-Origin", "*")
+		hdr.Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+		hdr.Set("Access-Control-Allow-Headers", "Content-Type")
+	}
+
+	// GET /courses — list saved courses (metadata only).
+	http.HandleFunc("/courses", func(w http.ResponseWriter, r *http.Request) {
+		cors(w)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, store.List())
+	})
+
+	// GET /courses/{id}  — fetch one course (current-format).
+	// PUT /courses/{id}  — create/replace a course file.
+	http.HandleFunc("/courses/", func(w http.ResponseWriter, r *http.Request) {
+		cors(w)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/courses/")
+		if !coursestore.ValidID(id) {
+			http.Error(w, "invalid course id", http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			c, ok := store.Get(id)
+			if !ok {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, c)
+		case http.MethodPut, http.MethodPost:
+			var c coursestore.Course
+			if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+				http.Error(w, "bad course json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			saved, err := store.Save(id, c)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			log.Printf("course saved: id=%q holes=%d", id, len(saved.Holes))
+			writeJSON(w, saved)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
 

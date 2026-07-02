@@ -88,7 +88,7 @@ func SplineSlope(x float64, coeffs []SplineCoeff) float64 {
 }
 
 // ComputeTerrainY and ComputeTerrainSlope handle all four mode combinations.
-func ComputeTerrainY(x float64, c Course, segs []BuiltSegment, coeffs []SplineCoeff) float64 {
+func ComputeTerrainY(x float64, c Hole, segs []BuiltSegment, coeffs []SplineCoeff) float64 {
 	s, w := c.UseSpline, c.UseWaves
 	if s && w {
 		return SplineY(x, coeffs) + TerrainY(x, segs) - c.BaseGround
@@ -102,7 +102,7 @@ func ComputeTerrainY(x float64, c Course, segs []BuiltSegment, coeffs []SplineCo
 	return c.BaseGround
 }
 
-func ComputeTerrainSlope(x float64, c Course, segs []BuiltSegment, coeffs []SplineCoeff) float64 {
+func ComputeTerrainSlope(x float64, c Hole, segs []BuiltSegment, coeffs []SplineCoeff) float64 {
 	s, w := c.UseSpline, c.UseWaves
 	if s && w {
 		return SplineSlope(x, coeffs) + TerrainSlope(x, segs)
@@ -245,7 +245,14 @@ func WaterPoolBounds(cx, level float64, cty func(float64) float64, worldW float6
 	return left, right, true
 }
 
-type Course struct {
+// Hole is a single self-contained playable hole: terrain, tees, cup, hazards,
+// and theme. It was formerly named Course — a "course" in the old code was
+// really one hole. A full Course (see package coursestore) is now an ordered
+// list of Holes. Everything downstream — physics edge-building, rendering — is
+// per-hole, so this struct is the unit sent to the physics/collision layer.
+type Hole struct {
+	Name          string           `json:"name,omitempty"`
+	Par           int              `json:"par,omitempty"`
 	WorldW        float64          `json:"worldW"`
 	WorldH        float64          `json:"worldH"`
 	BaseGround    float64          `json:"baseGround"`
@@ -272,7 +279,7 @@ type BuiltSegment struct {
 
 // BuildSegments computes startX and offset for each segment so adjacent
 // segments always connect at the same height (C0 continuity).
-func BuildSegments(c Course) []BuiltSegment {
+func BuildSegments(c Hole) []BuiltSegment {
 	built := make([]BuiltSegment, len(c.Segments))
 	curX := 0.0
 	curY := c.BaseGround
@@ -324,9 +331,9 @@ func TerrainSlope(x float64, segs []BuiltSegment) float64 {
 	return 0
 }
 
-// DefaultCourse returns the original 3-sinusoid terrain as a single segment.
-func DefaultCourse() Course {
-	return Course{
+// DefaultHole returns the original 3-sinusoid terrain as a single segment.
+func DefaultHole() Hole {
+	return Hole{
 		WorldW:      4000,
 		WorldH:      1000,
 		BaseGround:  650,

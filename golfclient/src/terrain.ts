@@ -215,7 +215,12 @@ export function waterPoolBounds(
   return { left, right }
 }
 
-export interface Course {
+// A Hole is a single self-contained playable hole (formerly named Course — a
+// "course" in the old single-hole code was really one hole). A Course is now an
+// ordered list of Holes; rendering and physics are per-hole.
+export interface Hole {
+  name?: string
+  par?: number
   worldW: number
   worldH: number
   baseGround: number
@@ -232,6 +237,19 @@ export interface Course {
   theme: CourseTheme
 }
 
+// The format version this client authors. Migration of older files happens
+// server-side at load time, so the client only ever receives current-format
+// courses; this constant is what it stamps on new/edited courses it saves.
+export const CURRENT_FORMAT_VERSION = 1
+
+// A Course is the multi-hole unit stored as one file on the server.
+export interface Course {
+  formatVersion: number
+  id: string
+  name: string
+  holes: Hole[]
+}
+
 // Precomputed segment — startX and offset are derived for height continuity at joints.
 export interface BuiltSegment {
   startX: number
@@ -242,7 +260,7 @@ export interface BuiltSegment {
 
 // Build segments from a Course, computing startX and offset for each so adjacent
 // segments always connect at exactly the same height (C0 continuity, slope may kink).
-export function buildSegments(course: Course): BuiltSegment[] {
+export function buildSegments(course: Hole): BuiltSegment[] {
   let curX = 0
   let curY = course.baseGround
   return course.segments.map(seg => {
@@ -283,8 +301,8 @@ export function terrainSlope(x: number, segs: BuiltSegment[]): number {
   return 0
 }
 
-// Default course: single segment replicating the original 3-sinusoid formula exactly.
-export const DEFAULT_COURSE: Course = {
+// Default hole: single segment replicating the original 3-sinusoid formula exactly.
+export const DEFAULT_HOLE: Hole = {
   worldW: 4000,
   worldH: 1000,
   baseGround: 650,
