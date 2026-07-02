@@ -1370,16 +1370,27 @@ export function initEditor(opts: {
     })
     content.appendChild(tabs)
 
-    // Hole ops.
+    // Hole lifecycle ops.
     const ops = document.createElement('div'); ops.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin:4px 0'
     ops.append(
       mkBtn('+ Add', addHole),
       mkBtn('Duplicate', duplicateHole),
       mkBtn('Delete', deleteHole),
-      mkBtn('◀', () => moveHole(-1)),
-      mkBtn('▶', () => moveHole(1)),
     )
     content.appendChild(ops)
+
+    // Reorder the active hole within the course (not navigation — click a tab to
+    // select). Disabled at the ends so it's clear these move, not select.
+    const reorder = document.createElement('div'); reorder.style.cssText = 'display:flex;gap:4px;margin:4px 0'
+    const moveL = mkBtn('Move ◀', () => moveHole(-1))
+    const moveR = mkBtn('Move ▶', () => moveHole(1))
+    moveL.title = 'Move this hole earlier in the course'
+    moveR.title = 'Move this hole later in the course'
+    moveL.disabled = activeHole === 0
+    moveR.disabled = activeHole === courseFile.holes.length - 1
+    for (const b of [moveL, moveR]) b.style.opacity = b.disabled ? '0.4' : '1'
+    reorder.append(moveL, moveR)
+    content.appendChild(reorder)
 
     // Active hole name + par.
     const holeNameRow = document.createElement('div'); holeNameRow.className = 'slider-row'

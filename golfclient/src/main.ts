@@ -3,6 +3,13 @@ import type { Course, Hole, BuiltSegment, SplineCoeff, Platform } from './terrai
 import { initEditor } from './editor'
 import { listCourses, getCourse, newCourse } from './courseapi'
 
+// mountGame builds and runs the single-player game inside `host`. This whole body
+// used to run at module load; it's wrapped in a function so the screen manager can
+// mount it on demand (Single Player / Map Editor) instead of on page load — which
+// also means the WebSocket only connects once the game is actually entered.
+// Returns a small handle so callers can open the map-editor overlay.
+export function mountGame(host: HTMLElement, opts: { openEditor?: boolean } = {}): { openEditor: () => void } {
+
 // ---- Canvas / render constants ----
 const CANVAS_W = 800
 const CANVAS_H = 540
@@ -125,11 +132,11 @@ function sendActiveCourse() {
 }
 
 // ---- DOM setup ----
-document.body.style.cssText = 'background:#050505;margin:0;display:flex;flex-direction:column;align-items:center;padding-top:40px'
+host.style.cssText = 'background:#050505;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding-top:40px;position:relative'
 
 const wrap = document.createElement('div')
 wrap.style.cssText = 'position:relative;display:inline-block'
-document.body.appendChild(wrap)
+host.appendChild(wrap)
 
 const canvas = document.createElement('canvas')
 canvas.width = CANVAS_W
@@ -168,7 +175,7 @@ const zoomText = document.createElement('span')
 zoomText.style.cssText = 'color:#666;font:13px monospace'
 zoomText.textContent = 'zoom'
 sliderRowEl.append(zoomText, zoomSlider, zoomLabel)
-document.body.appendChild(sliderRowEl)
+host.appendChild(sliderRowEl)
 
 // ---- Cutouts ----
 // Only the hole gaps the terrain (it's a real pit the ball drops through). Water
@@ -691,4 +698,9 @@ async function loadInitialCourse() {
   sendActiveCourse()
 }
 loadInitialCourse()
+
+if (opts.openEditor) editor.show()
+
+return { openEditor: () => editor.show() }
+}
 

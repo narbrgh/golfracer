@@ -25,7 +25,8 @@
       "Bash(node /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/bc1a4078-dc11-4d4f-bf2d-8b6e8c249485/scratchpad/repro.mjs)",
       "Bash(node -e ' *)",
       "Bash(xargs -r kill -9)",
-      "Bash(nohup go run .)"
+      "Bash(nohup go run .)",
+      "Bash(qlmanage -t -s 1000 -o /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/463f5b0e-0365-4242-84d8-203b497a851c/scratchpad /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/463f5b0e-0365-4242-84d8-203b497a851c/scratchpad/hero2.svg)"
     ]
   }
 }

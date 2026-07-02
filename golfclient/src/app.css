@@ -1,0 +1,99 @@
+/* Global base + shared chrome that isn't specific to one screen. Individual
+   screens bring their own CSS (see screens/mainMenu.css). */
+
+:root {
+  /* Retro-sunset palette, pulled from the beer-can artwork. */
+  --cream:      #f6efce;
+  --cream-deep: #efe6bd;
+  --ink:        #24405a;
+
+  --sun-1: #f4bd3d; /* top of sun (warm yellow) */
+  --sun-2: #f0a838;
+  --sun-3: #ec8f34;
+  --sun-4: #e5713a;
+  --sun-5: #dc5334;
+  --sun-6: #d23f2e; /* red band */
+
+  --sea-1: #33a89c; /* teal */
+  --sea-2: #3f9fd4; /* sky blue */
+  --sea-3: #2f79c2; /* blue */
+  --sea-4: #274f9c; /* deep blue */
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--cream);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+#app {
+  position: relative;
+  min-height: 100vh;
+}
+
+.screen {
+  min-height: 100vh;
+}
+
+/* Corner button that drops back to the main menu from the game screen. */
+.back-to-menu {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 40;
+  padding: 7px 13px;
+  border: 1px solid rgba(246, 239, 206, 0.35);
+  border-radius: 7px;
+  background: rgba(12, 20, 28, 0.82);
+  color: var(--cream);
+  font: 13px/1 monospace;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.back-to-menu:hover {
+  background: rgba(30, 46, 62, 0.95);
+  border-color: rgba(246, 239, 206, 0.7);
+}
+
+/* "Coming soon" placeholder (Online). */
+.coming-soon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--cream);
+}
+.cs-card {
+  text-align: center;
+  max-width: 420px;
+  padding: 32px;
+}
+.cs-card h2 {
+  margin: 0 0 10px;
+  font-size: 44px;
+  letter-spacing: 1px;
+}
+.cs-card p {
+  margin: 0 0 26px;
+  color: #6f7f74;
+  font-size: 16px;
+}
+.cs-back {
+  padding: 12px 22px;
+  border: none;
+  border-radius: 999px;
+  background: var(--sea-3);
+  color: var(--cream);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+.cs-back:hover { filter: brightness(1.08); }
