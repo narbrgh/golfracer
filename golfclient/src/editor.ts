@@ -1,5 +1,5 @@
-import type { Course, TerrainSegment, TerrainWave, CourseTheme, ControlPoint, Hazard } from './terrain'
-import { buildSegments, terrainY, DEFAULT_COURSE, buildSpline, splineY, hexWithAlpha, waterPoolBounds } from './terrain'
+import type { Course, TerrainSegment, TerrainWave, CourseTheme, ControlPoint, Hazard, Platform, Pt, Bunker } from './terrain'
+import { buildSegments, terrainY, DEFAULT_COURSE, buildSpline, splineY, hexWithAlpha, waterPoolBounds, pointInPoly } from './terrain'
 import './editor.css'
 
 export interface EditorHandle { show: () => void; hide: () => void }
@@ -34,13 +34,17 @@ export function initEditor(opts: {
       editCourse = {
         ...DEFAULT_COURSE, ...parsed,
         controlPoints: parsed.controlPoints ?? DEFAULT_COURSE.controlPoints,
+        bunkers: parsed.bunkers ?? [],
+        platforms: parsed.platforms ?? [],
         theme: { ...DEFAULT_COURSE.theme, ...(parsed.theme ?? {}) },
       }
       emit(); rebuild()
     } catch { /* ignore */ }
   })
+  const undoBtn = mkBtn('Undo', () => doUndo())
+  const redoBtn = mkBtn('Redo', () => doRedo())
   const controlsBtn = mkBtn('Controls', () => { controlsPopup.style.display = 'flex' })
-  toolbar.append(backBtn, titleEl, saveBtn, loadBtn, controlsBtn)
+  toolbar.append(backBtn, titleEl, saveBtn, loadBtn, undoBtn, redoBtn, controlsBtn)
   overlay.appendChild(toolbar)
 
   // ---- controls popup ----
@@ -181,6 +185,46 @@ export function initEditor(opts: {
   // ---- working copy ----
   let editCourse: Course = structuredClone(opts.getCourse())
 
+  // ---- undo stack ----
+  // Each emit() pushes the pre-mutation snapshot (captured as lastEmittedCourse)
+  // before overwriting it with the current post-mutation state. Undo pops and
+  // restores. Capped at 100 entries to bound memory on large courses.
+  const MAX_UNDO = 100
+  let undoStack: Course[] = []
+  let redoStack: Course[] = []
+  let lastEmittedCourse: Course = structuredClone(editCourse)
+
+  function syncUndoRedoBtns() {
+    undoBtn.disabled = undoStack.length === 0
+    undoBtn.style.opacity = undoStack.length === 0 ? '0.4' : '1'
+    redoBtn.disabled = redoStack.length === 0
+    redoBtn.style.opacity = redoStack.length === 0 ? '0.4' : '1'
+  }
+
+  function doUndo() {
+    if (undoStack.length === 0) return
+    redoStack.push(structuredClone(editCourse))
+    const prev = undoStack.pop()!
+    editCourse = prev
+    lastEmittedCourse = structuredClone(prev)
+    selectedPlatIdx = null
+    opts.onCourseChange(structuredClone(editCourse))
+    rebuild()
+    syncUndoRedoBtns()
+  }
+
+  function doRedo() {
+    if (redoStack.length === 0) return
+    undoStack.push(structuredClone(editCourse))
+    const next = redoStack.pop()!
+    editCourse = next
+    lastEmittedCourse = structuredClone(next)
+    selectedPlatIdx = null
+    opts.onCourseChange(structuredClone(editCourse))
+    rebuild()
+    syncUndoRedoBtns()
+  }
+
   // ---- water pool cache ----
   // Flood-fill bounds only change when editCourse's content does, so this is
   // rebuilt in emit()/rebuild() (the content-change choke points) instead of
@@ -218,6 +262,20 @@ export function initEditor(opts: {
   let miniDragging = false
   let spaceHeld = false
 
+  // ---- bunker editing state ----
+  let selectedBunkerIdx: number | null = null
+  let bunkerVertDragIdx  = -1
+  let bunkerBodyDragging = false
+  let bunkerDragOriginMouse: Pt = { x: 0, y: 0 }
+  let bunkerDragOriginPts: Pt[] = []
+
+  // ---- platform editing state ----
+  let selectedPlatIdx: number | null = null
+  let platVertDragIdx = -1            // which vertex is being dragged (-1 = none)
+  let platBodyDragging = false
+  let platDragOriginMouse: Pt = { x: 0, y: 0 }
+  let platDragOriginPts: Pt[] = []   // snapshot of all vertices at drag start
+
   // Space = temporary pan tool (same convention as Figma/Illustrator/Inkscape).
   // Only active while the editor overlay is visible.
   window.addEventListener('keydown', (e) => {
@@ -226,6 +284,31 @@ export function initEditor(opts: {
       spaceHeld = true
       previewCanvas.style.cursor = 'grab'
       e.preventDefault()
+    }
+    if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+      e.preventDefault(); doUndo()
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+      e.preventDefault(); doRedo()
+    }
+    // Arrow keys move the selected platform. Ignore if an input has focus so
+    // sliders and number boxes still work normally.
+    if ((selectedPlatIdx !== null || selectedBunkerIdx !== null)
+        && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)
+        && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
+      e.preventDefault()
+      const step = e.shiftKey ? 1 : 10
+      const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+      const dy = e.key === 'ArrowUp'   ? -step : e.key === 'ArrowDown'  ? step : 0
+      if (selectedPlatIdx !== null) {
+        const plat = editCourse.platforms[selectedPlatIdx]
+        plat.points = plat.points.map(p => ({ x: p.x + dx, y: p.y + dy }))
+      }
+      if (selectedBunkerIdx !== null) {
+        const b = editCourse.bunkers[selectedBunkerIdx]
+        b.topEdge = b.topEdge.map(p => ({ x: p.x + dx, y: p.y + dy }))
+      }
+      emit()
     }
   })
   window.addEventListener('keyup', (e) => {
@@ -247,6 +330,241 @@ export function initEditor(opts: {
     ctx.beginPath(); ctx.moveTo(x, ty(0)); ctx.lineTo(x, ty(editCourse.worldH)); ctx.stroke()
     ctx.setLineDash([])
     ctx.restore()
+  }
+
+  // ---- bunker helpers ----
+
+  const BUNKER_FILL_PREVIEW  = 'rgba(210,185,100,0.80)'
+  const BUNKER_STROKE_COLOR  = 'rgba(155,130,40,0.9)'
+  const BUNKER_STROKE_SEL    = 'rgba(255,210,60,1)'
+
+  // Draw all bunkers: fill between spline top and terrain.
+  // Same draw-before-terrain trick as water: fill from spline rim to worldH,
+  // terrain drawn after covers the underground part. ptY is only used to know
+  // worldH (via editCourse.worldH) — not for clipping the fill polygon.
+  function drawBunkersPreview(
+    ctx: CanvasRenderingContext2D,
+    tx: (x: number) => number,
+    ty: (y: number) => number,
+  ) {
+    for (let bi = 0; bi < editCourse.bunkers.length; bi++) {
+      const b = editCourse.bunkers[bi]
+      if (b.topEdge.length < 2) continue
+      const sel    = bi === selectedBunkerIdx
+      const coeffs = buildSpline(b.topEdge)
+      const leftX  = Math.min(...b.topEdge.map(p => p.x))
+      const rightX = Math.max(...b.topEdge.map(p => p.x))
+      // Fill: spline rim → worldH (terrain drawn after clips the underground part)
+      ctx.beginPath()
+      ctx.moveTo(tx(leftX), ty(splineY(leftX, coeffs)))
+      for (let x = leftX + 5; x < rightX; x += 5) ctx.lineTo(tx(x), ty(splineY(x, coeffs)))
+      ctx.lineTo(tx(rightX), ty(splineY(rightX, coeffs)))
+      ctx.lineTo(tx(rightX), ty(editCourse.worldH))
+      ctx.lineTo(tx(leftX),  ty(editCourse.worldH))
+      ctx.closePath()
+      ctx.fillStyle = BUNKER_FILL_PREVIEW; ctx.fill()
+      // Rim stroke — terrain drawn on top will cover underground portions.
+      ctx.beginPath()
+      ctx.moveTo(tx(leftX), ty(splineY(leftX, coeffs)))
+      for (let x = leftX + 5; x <= rightX; x += 5) ctx.lineTo(tx(x), ty(splineY(x, coeffs)))
+      ctx.strokeStyle = sel ? BUNKER_STROKE_SEL : BUNKER_STROKE_COLOR
+      ctx.lineWidth = sel ? 2.5 : 1.5; ctx.stroke()
+    }
+  }
+
+  // Draw handles for the selected bunker's top-edge control points.
+  function drawBunkerHandles(
+    ctx: CanvasRenderingContext2D,
+    toScreen: (p: Pt) => { sx: number; sy: number },
+  ) {
+    if (selectedBunkerIdx === null) return
+    const b = editCourse.bunkers[selectedBunkerIdx]
+    if (!b || b.topEdge.length < 2) return
+    const pts = b.topEdge
+    // Edge midpoints (open polyline → n-1 midpoints)
+    ctx.fillStyle = 'rgba(160,160,220,0.7)'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = toScreen(pts[i]), bb = toScreen(pts[i + 1])
+      ctx.beginPath(); ctx.arc((a.sx+bb.sx)/2, (a.sy+bb.sy)/2, MID_R, 0, Math.PI*2); ctx.fill(); ctx.stroke()
+    }
+    // Vertices (orange to distinguish from platform blue)
+    for (let i = 0; i < pts.length; i++) {
+      const { sx, sy } = toScreen(pts[i])
+      ctx.fillStyle = i === bunkerVertDragIdx ? '#fff' : '#fa8'
+      ctx.beginPath(); ctx.arc(sx, sy, VERT_R, 0, Math.PI*2); ctx.fill()
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
+    }
+  }
+
+  function hitTestBunkerVertex(cx: number, cy: number, toScreen: (p: Pt) => { sx: number; sy: number }): number {
+    if (selectedBunkerIdx === null) return -1
+    const pts = editCourse.bunkers[selectedBunkerIdx]?.topEdge ?? []
+    for (let i = 0; i < pts.length; i++) {
+      const { sx, sy } = toScreen(pts[i])
+      if (Math.hypot(cx-sx, cy-sy) <= VERT_R + 2) return i
+    }
+    return -1
+  }
+
+  function hitTestBunkerEdgeMid(cx: number, cy: number, toScreen: (p: Pt) => { sx: number; sy: number }): number {
+    if (selectedBunkerIdx === null) return -1
+    const pts = editCourse.bunkers[selectedBunkerIdx]?.topEdge ?? []
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = toScreen(pts[i]), bb = toScreen(pts[i + 1])
+      if (Math.hypot(cx-(a.sx+bb.sx)/2, cy-(a.sy+bb.sy)/2) <= MID_R + 3) return i
+    }
+    return -1
+  }
+
+  // Return the index of the first unselected bunker whose fill region contains (wx, wy).
+  function hitTestBunkerBody(wx: number, wy: number, ptY: (x:number)=>number): number {
+    for (let bi = editCourse.bunkers.length - 1; bi >= 0; bi--) {
+      if (bi === selectedBunkerIdx) continue
+      const b = editCourse.bunkers[bi]
+      if (b.topEdge.length < 2) continue
+      const leftX  = Math.min(...b.topEdge.map(p => p.x))
+      const rightX = Math.max(...b.topEdge.map(p => p.x))
+      if (wx < leftX || wx > rightX) continue
+      const coeffs = buildSpline(b.topEdge)
+      const topY   = splineY(wx, coeffs)
+      const groundY = ptY(wx)
+      // rim above terrain = topY < groundY (screen Y, increases downward)
+      if (topY < groundY && wy >= topY && wy <= groundY) return bi
+    }
+    return -1
+  }
+
+  // Make a 3-point arc default bunker top edge centered at (cx, cy) in world coords.
+  function makeDefaultBunker(cx: number, ptY: (x:number)=>number): Pt[] {
+    const hw = 150
+    const groundL = ptY(cx - hw), groundC = ptY(cx), groundR = ptY(cx + hw)
+    return [
+      { x: cx - hw, y: groundL - 30 },
+      { x: cx,      y: Math.min(groundC, groundL, groundR) - 60 },
+      { x: cx + hw, y: groundR - 30 },
+    ]
+  }
+
+  // ---- platform helpers ----
+
+  const PLAT_FILL_DEFAULT  = '#f5d800'
+  const PLAT_EDGE_DEFAULT  = '#b8a000'
+  const PLAT_STROKE_SEL    = 'rgba(220,220,255,1)'
+  const VERT_R = 6   // vertex handle radius (screen px)
+  const MID_R  = 4   // edge-midpoint handle radius
+
+  // Draw all platforms whose zOrder matches `which`. `toScreen` maps world→canvas.
+  function drawPlatformsPreview(
+    ctx: CanvasRenderingContext2D,
+    which: Platform['zOrder'],
+    toScreen: (p: Pt) => { sx: number; sy: number },
+  ) {
+    for (let pi = 0; pi < editCourse.platforms.length; pi++) {
+      const plat = editCourse.platforms[pi]
+      if (plat.zOrder !== which || plat.points.length < 3) continue
+      const sel = pi === selectedPlatIdx
+      const s0 = toScreen(plat.points[0])
+      ctx.beginPath(); ctx.moveTo(s0.sx, s0.sy)
+      for (let i = 1; i < plat.points.length; i++) {
+        const s = toScreen(plat.points[i]); ctx.lineTo(s.sx, s.sy)
+      }
+      ctx.closePath()
+      ctx.fillStyle = plat.fillColor || PLAT_FILL_DEFAULT; ctx.fill()
+      ctx.strokeStyle = sel ? PLAT_STROKE_SEL : (plat.edgeColor || PLAT_EDGE_DEFAULT)
+      ctx.lineWidth = sel ? 2.5 : 1.5; ctx.stroke()
+    }
+  }
+
+  // Draw vertex + edge-midpoint handles for the selected platform.
+  function drawPlatformHandles(
+    ctx: CanvasRenderingContext2D,
+    toScreen: (p: Pt) => { sx: number; sy: number },
+  ) {
+    if (selectedPlatIdx === null) return
+    const plat = editCourse.platforms[selectedPlatIdx]
+    if (!plat || plat.points.length < 3) return
+    const pts = plat.points
+    // Edge midpoints
+    ctx.fillStyle = 'rgba(160,160,220,0.7)'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1
+    for (let i = 0; i < pts.length; i++) {
+      const a = toScreen(pts[i]), b = toScreen(pts[(i+1) % pts.length])
+      const mx = (a.sx+b.sx)/2, my = (a.sy+b.sy)/2
+      ctx.beginPath(); ctx.arc(mx, my, MID_R, 0, Math.PI*2); ctx.fill(); ctx.stroke()
+    }
+    // Vertices (drawn on top of midpoints)
+    for (let i = 0; i < pts.length; i++) {
+      const { sx, sy } = toScreen(pts[i])
+      ctx.fillStyle = i === platVertDragIdx ? '#fff' : '#7af'
+      ctx.beginPath(); ctx.arc(sx, sy, VERT_R, 0, Math.PI*2); ctx.fill()
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
+    }
+  }
+
+  // Hit-test a point against vertex handles of the selected platform.
+  // Returns vertex index or -1.
+  function hitTestVertex(
+    cx: number, cy: number,
+    toScreen: (p: Pt) => { sx: number; sy: number },
+  ): number {
+    if (selectedPlatIdx === null) return -1
+    const pts = editCourse.platforms[selectedPlatIdx]?.points ?? []
+    for (let i = 0; i < pts.length; i++) {
+      const { sx, sy } = toScreen(pts[i])
+      if (Math.hypot(cx-sx, cy-sy) <= VERT_R + 2) return i
+    }
+    return -1
+  }
+
+  // Hit-test edge midpoints of the selected platform.
+  // Returns the edge index (insert after index i, before i+1), or -1.
+  function hitTestEdgeMid(
+    cx: number, cy: number,
+    toScreen: (p: Pt) => { sx: number; sy: number },
+  ): number {
+    if (selectedPlatIdx === null) return -1
+    const pts = editCourse.platforms[selectedPlatIdx]?.points ?? []
+    for (let i = 0; i < pts.length; i++) {
+      const a = toScreen(pts[i]), b = toScreen(pts[(i+1) % pts.length])
+      if (Math.hypot(cx-(a.sx+b.sx)/2, cy-(a.sy+b.sy)/2) <= MID_R + 3) return i
+    }
+    return -1
+  }
+
+  // Return the index of the first platform whose polygon contains world point (wx,wy),
+  // or -1 if none. Skips the currently selected platform (use vertex/body drag instead).
+  function hitTestPlatformBody(wx: number, wy: number): number {
+    for (let pi = editCourse.platforms.length - 1; pi >= 0; pi--) {
+      if (pi === selectedPlatIdx) continue
+      const plat = editCourse.platforms[pi]
+      if (plat.points.length >= 3 && pointInPoly(wx, wy, plat.points)) return pi
+    }
+    return -1
+  }
+
+  // Screen→world helpers for each view mode (used in event handlers).
+  function screenToWorld(cx: number, cy: number): Pt {
+    if (viewMode === 'game') return { x: cx / gvZoom + gvCamX, y: cy / gvZoom + gvCamY }
+    const { wx, wy } = globalMetrics()
+    return { x: wx(cx), y: wy(cy) }
+  }
+
+  function worldToScreenFn(): (p: Pt) => { sx: number; sy: number } {
+    if (viewMode === 'game') {
+      return (p) => ({ sx: (p.x - gvCamX) * gvZoom, sy: (p.y - gvCamY) * gvZoom })
+    }
+    const { tx, ty } = globalMetrics()
+    return (p) => ({ sx: tx(p.x), sy: ty(p.y) })
+  }
+
+  // Make a long skinny rectangle (CW winding) centered at world (wx,wy).
+  function makeDefaultPlatform(wx: number, wy: number): Pt[] {
+    const hw = 180, hh = 18
+    return [
+      { x: wx - hw, y: wy - hh },
+      { x: wx + hw, y: wy - hh },
+      { x: wx + hw, y: wy + hh },
+      { x: wx - hw, y: wy + hh },
+    ]
   }
 
   // ---- helpers ----
@@ -350,7 +668,16 @@ export function initEditor(opts: {
   }
 
   // ---- emit ----
-  function emit() { rebuildWaterPools(); drawPreview(); opts.onCourseChange(structuredClone(editCourse)) }
+  function emit() {
+    // Push the pre-mutation snapshot (lastEmittedCourse) before processing the change.
+    // Any new action clears the redo stack — same convention as every editor.
+    undoStack.push(lastEmittedCourse)
+    if (undoStack.length > MAX_UNDO) undoStack.shift()
+    redoStack = []
+    lastEmittedCourse = structuredClone(editCourse)
+    syncUndoRedoBtns()
+    rebuildWaterPools(); drawPreview(); opts.onCourseChange(structuredClone(editCourse))
+  }
 
   // ---- draw ----
   function drawPreview() {
@@ -428,11 +755,15 @@ export function initEditor(opts: {
       ctx.setLineDash([])
     }
 
+    const toScreenG = (p: Pt) => ({ sx: tx(p.x), sy: ty(p.y) })
+    drawPlatformsPreview(ctx, 'back', toScreenG)
+
     // Water is drawn before the terrain, as a plain rectangle — the terrain
     // fill (opaque down to worldH) then paints over whatever part of that
     // rectangle sits above the real ground, giving a shoreline that exactly
     // follows the terrain's contour for free instead of a hard rectangular edge.
     drawWaterTrapsPreview(ctx, tx, ty)
+    drawBunkersPreview(ctx, tx, ty)
 
     // terrain fill
     ctx.beginPath(); ctx.moveTo(tx(0), ty(ptY(0)))
@@ -447,6 +778,9 @@ export function initEditor(opts: {
     ctx.lineWidth = Math.max(1, th.groundLineW * s * 0.8); ctx.stroke()
 
     drawActiveXMarker(ctx, tx, ty)
+    drawBunkerHandles(ctx, toScreenG)
+    drawPlatformsPreview(ctx, 'front', toScreenG)
+    drawPlatformHandles(ctx, toScreenG)
 
     // segment labels
     if (editCourse.useWaves) {
@@ -553,7 +887,11 @@ export function initEditor(opts: {
       ctx.lineTo(ee+shift, editCourse.worldH); ctx.lineTo(es+shift, editCourse.worldH); ctx.closePath(); ctx.fill()
     })()
 
+    const toScreenGV = (p: Pt) => ({ sx: (p.x - gvCamX) * gvZoom, sy: (p.y - gvCamY) * gvZoom })
+    const identity   = (p: Pt) => ({ sx: p.x, sy: p.y })
+    drawPlatformsPreview(ctx, 'back', identity)
     drawWaterTrapsPreview(ctx, x => x, y => y)
+    drawBunkersPreview(ctx, x => x, y => y)
 
     // terrain fill
     ctx.beginPath(); ctx.moveTo(0, ptY(0))
@@ -567,6 +905,7 @@ export function initEditor(opts: {
     ctx.strokeStyle = th.groundLine; ctx.lineWidth = th.groundLineW; ctx.stroke()
 
     drawActiveXMarker(ctx, x => x, y => y)
+    drawPlatformsPreview(ctx, 'front', identity)
 
     // world border
     ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 6 / gvZoom
@@ -603,6 +942,10 @@ export function initEditor(opts: {
 
     ctx.restore()
 
+    // Handles drawn in screen coords (after restore) so they stay a fixed pixel size.
+    drawBunkerHandles(ctx, toScreenGV)
+    drawPlatformHandles(ctx, toScreenGV)
+
     // minimap (screen coords)
     const { x: mx, y: my, w: mw, h: mh } = GAME_MINIMAP
     ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(mx, my, mw, mh)
@@ -626,34 +969,119 @@ export function initEditor(opts: {
     const rect = previewCanvas.getBoundingClientRect()
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top
 
+    // Minimap (game view only) — always takes priority.
     if (viewMode === 'game') {
-      // Minimap — always takes priority so it can't accidentally add a point.
       const { x: mx, y: my, w: mw, h: mh } = GAME_MINIMAP
       if (cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh) {
         miniDragging = true; panToMini(cx, cy); drawPreview(); return
       }
-      // Space held → pan, regardless of spline mode or what's under the cursor.
-      if (spaceHeld) { startPan(cx, cy); return }
-      if (!editCourse.useSpline) return
-      // Spline editing: hit-test existing points first, then add on empty click.
+    }
+    // Space → pan.
+    if (spaceHeld) { startPan(cx, cy); return }
+
+    const toScreen = worldToScreenFn()
+
+    // Compute terrain ptY once for bunker hit-testing (cheap, only on click).
+    const _segs    = buildSegments(editCourse)
+    const _spCoeff = buildSpline(editCourse.controlPoints)
+    const _ptY     = makePtY(_segs, _spCoeff)
+
+    // ---- bunker interactions ----
+    // 1. Vertex handle of selected bunker?
+    const bvIdx = hitTestBunkerVertex(cx, cy, toScreen)
+    if (bvIdx !== -1) { bunkerVertDragIdx = bvIdx; return }
+    // 2. Edge midpoint of selected bunker? → insert a point.
+    const beIdx = hitTestBunkerEdgeMid(cx, cy, toScreen)
+    if (beIdx !== -1) {
+      const w = screenToWorld(cx, cy)
+      editCourse.bunkers[selectedBunkerIdx!].topEdge.splice(beIdx + 1, 0, { x: w.x, y: w.y })
+      editCourse.bunkers[selectedBunkerIdx!].topEdge.sort((a, b) => a.x - b.x)
+      emit(); drawPreview(); return
+    }
+    // 3. Inside fill of selected bunker? → body drag.
+    if (selectedBunkerIdx !== null) {
+      const w = screenToWorld(cx, cy)
+      if (hitTestBunkerBody(w.x, w.y, _ptY) === -1) { // body of THIS bunker
+        const b = editCourse.bunkers[selectedBunkerIdx]
+        const leftX = Math.min(...b.topEdge.map(p => p.x))
+        const rightX = Math.max(...b.topEdge.map(p => p.x))
+        if (w.x >= leftX && w.x <= rightX) {
+          const coeffs = buildSpline(b.topEdge)
+          const topY = splineY(w.x, coeffs)
+          if (w.y >= _ptY(w.x) && w.y <= topY) {
+            bunkerBodyDragging = true
+            bunkerDragOriginMouse = w
+            bunkerDragOriginPts = b.topEdge.map(p => ({ ...p }))
+            return
+          }
+        }
+      }
+    }
+    // 4. Click on a different unselected bunker? → select it.
+    const wBunker = screenToWorld(cx, cy)
+    const hitBi = hitTestBunkerBody(wBunker.x, wBunker.y, _ptY)
+    if (hitBi !== -1) {
+      selectedBunkerIdx = hitBi; selectedPlatIdx = null; rebuild(); return
+    }
+    // 5. Deselect bunker if one was selected.
+    if (selectedBunkerIdx !== null) {
+      selectedBunkerIdx = null; rebuild(); return
+    }
+
+    // ---- platform interactions ----
+    // 1. Vertex handle of selected platform?
+    const vIdx = hitTestVertex(cx, cy, toScreen)
+    if (vIdx !== -1) {
+      platVertDragIdx = vIdx; return
+    }
+    // 2. Edge midpoint of selected platform? → insert a vertex.
+    const eIdx = hitTestEdgeMid(cx, cy, toScreen)
+    if (eIdx !== -1) {
+      const plat = editCourse.platforms[selectedPlatIdx!]
+      const { x: wx, y: wy } = screenToWorld(cx, cy)
+      plat.points.splice(eIdx + 1, 0, { x: wx, y: wy })
+      emit(); drawPreview(); return
+    }
+    // 3. Body of selected platform? → body drag.
+    if (selectedPlatIdx !== null) {
+      const plat = editCourse.platforms[selectedPlatIdx]
+      const w = screenToWorld(cx, cy)
+      if (pointInPoly(w.x, w.y, plat.points)) {
+        platBodyDragging = true
+        platDragOriginMouse = w
+        platDragOriginPts = plat.points.map(p => ({ ...p }))
+        return
+      }
+    }
+    // 4. Body of a different platform? → select it.
+    const wc = screenToWorld(cx, cy)
+    const hitPi = hitTestPlatformBody(wc.x, wc.y)
+    if (hitPi !== -1) {
+      selectedPlatIdx = hitPi; rebuild(); return
+    }
+    // 5. Click on empty space → deselect platform, then handle spline editing.
+    if (selectedPlatIdx !== null) {
+      selectedPlatIdx = null; rebuild(); return
+    }
+
+    // ---- spline editing ----
+    if (!editCourse.useSpline) {
+      if (viewMode === 'game') startPan(cx, cy)
+      return
+    }
+    if (viewMode === 'game') {
       const closest = findClosestCp(cx, cy, (pt) => ({
         sx: (pt.x - gvCamX) * gvZoom, sy: (pt.y - gvCamY) * gvZoom,
       }), 10)
-      if (closest !== -1) {
-        dragIdx = closest
-      } else {
-        const newPt: ControlPoint = { x: cx / gvZoom + gvCamX, y: cy / gvZoom + gvCamY }
-        editCourse.controlPoints.push(newPt)
-        editCourse.controlPoints.sort((a, b) => a.x - b.x)
-        emit()
-      }
+      if (closest !== -1) { dragIdx = closest; return }
+      const newPt: ControlPoint = { x: cx / gvZoom + gvCamX, y: cy / gvZoom + gvCamY }
+      editCourse.controlPoints.push(newPt)
+      editCourse.controlPoints.sort((a, b) => a.x - b.x)
+      emit()
     } else {
-      // global view
-      if (!editCourse.useSpline) return
       const { tx, ty, wx, wy } = globalMetrics()
       const closest = findClosestCp(cx, cy, (pt) => ({ sx: tx(pt.x), sy: ty(pt.y) }), 10)
       if (closest !== -1) { dragIdx = closest; return }
-      // add new point (unclamped — can be outside world bounds)
       const newPt: ControlPoint = { x: wx(cx), y: wy(cy) }
       editCourse.controlPoints.push(newPt)
       editCourse.controlPoints.sort((a, b) => a.x - b.x)
@@ -665,13 +1093,39 @@ export function initEditor(opts: {
     const rect = previewCanvas.getBoundingClientRect()
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top
 
+    if (miniDragging) { panToMini(cx, cy); drawPreview(); previewCanvas.style.cursor = 'grabbing'; return }
+
+    // Bunker vertex drag
+    if (bunkerVertDragIdx !== -1 && selectedBunkerIdx !== null) {
+      const w = screenToWorld(cx, cy)
+      const pts = editCourse.bunkers[selectedBunkerIdx].topEdge
+      pts[bunkerVertDragIdx] = w
+      pts.sort((a, b) => a.x - b.x)
+      emit(); return
+    }
+    // Bunker body drag
+    if (bunkerBodyDragging && selectedBunkerIdx !== null) {
+      const w = screenToWorld(cx, cy)
+      const dx = w.x - bunkerDragOriginMouse.x, dy = w.y - bunkerDragOriginMouse.y
+      editCourse.bunkers[selectedBunkerIdx].topEdge = bunkerDragOriginPts.map(p => ({ x: p.x+dx, y: p.y+dy }))
+      emit(); return
+    }
+
+    // Platform vertex drag
+    if (platVertDragIdx !== -1 && selectedPlatIdx !== null) {
+      const w = screenToWorld(cx, cy)
+      editCourse.platforms[selectedPlatIdx].points[platVertDragIdx] = w
+      emit(); return
+    }
+    // Platform body drag
+    if (platBodyDragging && selectedPlatIdx !== null) {
+      const w = screenToWorld(cx, cy)
+      const dx = w.x - platDragOriginMouse.x, dy = w.y - platDragOriginMouse.y
+      editCourse.platforms[selectedPlatIdx].points = platDragOriginPts.map(p => ({ x: p.x+dx, y: p.y+dy }))
+      emit(); return
+    }
+
     if (viewMode === 'game') {
-      if (miniDragging) {
-        panToMini(cx, cy)
-        drawPreview()
-        previewCanvas.style.cursor = 'grabbing'
-        return
-      }
       if (dragIdx !== -1) {
         editCourse.controlPoints[dragIdx].x = cx / gvZoom + gvCamX
         editCourse.controlPoints[dragIdx].y = cy / gvZoom + gvCamY
@@ -684,7 +1138,7 @@ export function initEditor(opts: {
         drawPreview()
       }
       previewCanvas.style.cursor = (panDragging || miniDragging) ? 'grabbing'
-        : dragIdx !== -1 ? 'grabbing'
+        : dragIdx !== -1 || platVertDragIdx !== -1 || platBodyDragging ? 'grabbing'
         : spaceHeld ? 'grab'
         : isNearAnyCp(cx, cy, (pt) => ({ sx: (pt.x-gvCamX)*gvZoom, sy: (pt.y-gvCamY)*gvZoom })) ? 'grab'
         : 'crosshair'
@@ -703,17 +1157,43 @@ export function initEditor(opts: {
     }
   })
 
-  previewCanvas.addEventListener('mouseup',    () => { dragIdx = -1; panDragging = false; miniDragging = false })
-  previewCanvas.addEventListener('mouseleave', () => { dragIdx = -1; panDragging = false; miniDragging = false })
+  function resetDragState() {
+    dragIdx = -1; panDragging = false; miniDragging = false
+    platVertDragIdx = -1; platBodyDragging = false
+    bunkerVertDragIdx = -1; bunkerBodyDragging = false
+  }
+  previewCanvas.addEventListener('mouseup',    resetDragState)
+  previewCanvas.addEventListener('mouseleave', resetDragState)
 
   previewCanvas.addEventListener('dblclick', (e) => {
-    if (!editCourse.useSpline || editCourse.controlPoints.length <= 2) return
     const rect = previewCanvas.getBoundingClientRect()
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top
-    const toScreen = viewMode === 'game'
+    const toScreen = worldToScreenFn()
+
+    // Double-click on a vertex of the selected bunker → delete it (min 2).
+    if (selectedBunkerIdx !== null) {
+      const b = editCourse.bunkers[selectedBunkerIdx]
+      if (b.topEdge.length > 2) {
+        const bvIdx = hitTestBunkerVertex(cx, cy, toScreen)
+        if (bvIdx !== -1) { b.topEdge.splice(bvIdx, 1); emit(); return }
+      }
+    }
+
+    // Double-click on a vertex of the selected platform → delete it.
+    if (selectedPlatIdx !== null) {
+      const plat = editCourse.platforms[selectedPlatIdx]
+      if (plat.points.length > 3) {
+        const vIdx = hitTestVertex(cx, cy, toScreen)
+        if (vIdx !== -1) { plat.points.splice(vIdx, 1); emit(); return }
+      }
+    }
+
+    // Fall through to spline vertex delete.
+    if (!editCourse.useSpline || editCourse.controlPoints.length <= 2) return
+    const toScreenCp = viewMode === 'game'
       ? (pt: ControlPoint) => ({ sx: (pt.x - gvCamX) * gvZoom, sy: (pt.y - gvCamY) * gvZoom })
       : (pt: ControlPoint) => { const { tx, ty } = globalMetrics(); return { sx: tx(pt.x), sy: ty(pt.y) } }
-    const idx = findClosestCp(cx, cy, toScreen, 12)
+    const idx = findClosestCp(cx, cy, toScreenCp, 12)
     if (idx !== -1) { editCourse.controlPoints.splice(idx, 1); emit() }
   })
 
@@ -754,6 +1234,8 @@ export function initEditor(opts: {
   // ---- build sidebar ----
   function rebuild() {
     rebuildWaterPools() // covers reassigning editCourse wholesale (e.g. show()) without an emit()
+    if (selectedBunkerIdx !== null && selectedBunkerIdx >= editCourse.bunkers.length) selectedBunkerIdx = null
+    if (selectedPlatIdx   !== null && selectedPlatIdx   >= editCourse.platforms.length) selectedPlatIdx = null
     sidebar.innerHTML = ''
     buildWorldSection()
     buildHoleTeeSection()
@@ -761,6 +1243,8 @@ export function initEditor(opts: {
     if (editCourse.useSpline) buildSplineSection()
     if (editCourse.useWaves) buildSegmentsSection()
     buildHazardsSection()
+    buildBunkersSection()
+    buildPlatformsSection()
     buildThemeSection()
     drawPreview()
   }
@@ -881,6 +1365,147 @@ export function initEditor(opts: {
     return el
   }
 
+  function buildBunkersSection() {
+    const { sec, content } = mksec('Bunkers')
+    content.appendChild(mkBtn('+ Add Bunker', () => {
+      let cx = editCourse.worldW / 2
+      if (viewMode === 'game') {
+        const cw = canvasWrap.clientWidth || 800
+        cx = gvCamX + cw / gvZoom / 2
+      }
+      const segs = buildSegments(editCourse)
+      const spCoeffs = buildSpline(editCourse.controlPoints)
+      const ptY = makePtY(segs, spCoeffs)
+      const newBunker: Bunker = {
+        topEdge: makeDefaultBunker(cx, ptY),
+        friction: 4, shallowMult: 0.75, deepMult: 0.25, deepThreshold: 300,
+      }
+      editCourse.bunkers.push(newBunker)
+      selectedBunkerIdx = editCourse.bunkers.length - 1
+      selectedPlatIdx = null
+      emit(); rebuild()
+    }, 'add-btn'))
+    editCourse.bunkers.forEach((b, bi) => content.appendChild(buildBunkerEl(b, bi)))
+    sidebar.appendChild(sec)
+  }
+
+  function buildBunkerEl(b: Bunker, bi: number): HTMLElement {
+    const el = document.createElement('div')
+    el.className = 'editor-segment' + (bi === selectedBunkerIdx ? ' platform-selected' : '')
+    el.style.cursor = 'pointer'
+    el.addEventListener('click', () => { selectedBunkerIdx = bi; selectedPlatIdx = null; rebuild() })
+
+    const hdr = document.createElement('div'); hdr.className = 'segment-header'
+    const name = document.createElement('span'); name.textContent = `Bunker ${bi + 1}`
+    const dup = mkBtn('Dup', () => {
+      const copy: Bunker = { ...b, topEdge: b.topEdge.map(p => ({ ...p })) }
+      editCourse.bunkers.splice(bi + 1, 0, copy)
+      selectedBunkerIdx = bi + 1
+      emit(); rebuild()
+    })
+    const del = mkBtn('×', () => {
+      editCourse.bunkers.splice(bi, 1)
+      if (selectedBunkerIdx === bi) selectedBunkerIdx = null
+      else if (selectedBunkerIdx !== null && selectedBunkerIdx > bi) selectedBunkerIdx--
+      emit(); rebuild()
+    }, 'del-btn')
+    hdr.append(name, dup, del); el.appendChild(hdr)
+
+    // Center X: shifts all rim points horizontally as a unit.
+    const getCenterX = () => (Math.min(...b.topEdge.map(p => p.x)) + Math.max(...b.topEdge.map(p => p.x))) / 2
+    el.appendChild(sliderRow('Center X', getCenterX(), 0, editCourse.worldW, 10, v => {
+      const delta = v - getCenterX()
+      b.topEdge = b.topEdge.map(p => ({ x: p.x + delta, y: p.y }))
+      emit()
+    }))
+    el.appendChild(sliderRow('Friction',       b.friction,      1, 20,  0.5, v => { b.friction      = v; emit() }))
+    el.appendChild(sliderRow('Shallow mult',   b.shallowMult,   0,  1, 0.05, v => { b.shallowMult   = v; emit() }, v => v.toFixed(2)))
+    el.appendChild(sliderRow('Deep mult',      b.deepMult,      0,  1, 0.05, v => { b.deepMult      = v; emit() }, v => v.toFixed(2)))
+    el.appendChild(sliderRow('Deep threshold', b.deepThreshold, 50, 800, 25, v => { b.deepThreshold = v; emit() }))
+
+    const hint = document.createElement('div')
+    hint.style.cssText = 'font:11px monospace;color:#666;padding:2px 0 4px 0'
+    hint.textContent = `${b.topEdge.length} rim points  (click preview to edit)`
+    el.appendChild(hint)
+    return el
+  }
+
+  function buildPlatformsSection() {
+    const { sec, content } = mksec('Platforms')
+    content.appendChild(mkBtn('+ Add Platform', () => {
+      // Center the triangle in the current view.
+      let cx = editCourse.worldW / 2, cy = editCourse.worldH / 2
+      if (viewMode === 'game') {
+        const cw = canvasWrap.clientWidth || 800, ch = canvasWrap.clientHeight || 400
+        cx = gvCamX + cw / gvZoom / 2
+        cy = gvCamY + ch / gvZoom / 2
+      }
+      const src = selectedPlatIdx !== null ? editCourse.platforms[selectedPlatIdx] : null
+      const plat: Platform = {
+        points: makeDefaultPlatform(cx, cy),
+        zOrder: src?.zOrder ?? 'front',
+        fillColor: src?.fillColor ?? PLAT_FILL_DEFAULT,
+        edgeColor: src?.edgeColor ?? PLAT_EDGE_DEFAULT,
+      }
+      editCourse.platforms.push(plat)
+      selectedPlatIdx = editCourse.platforms.length - 1
+      emit(); rebuild()
+    }, 'add-btn'))
+    editCourse.platforms.forEach((plat, pi) => {
+      content.appendChild(buildPlatformEl(plat, pi))
+    })
+    sidebar.appendChild(sec)
+  }
+
+  function buildPlatformEl(plat: Platform, pi: number): HTMLElement {
+    const el = document.createElement('div')
+    el.className = 'editor-segment' + (pi === selectedPlatIdx ? ' platform-selected' : '')
+    el.style.cursor = 'pointer'
+    el.addEventListener('click', () => { selectedPlatIdx = pi; rebuild() })
+
+    const hdr = document.createElement('div'); hdr.className = 'segment-header'
+    const name = document.createElement('span'); name.textContent = `Platform ${pi + 1}`
+    const dup = mkBtn('Dup', () => {
+      const copy: Platform = {
+        points: plat.points.map(p => ({ ...p })),
+        zOrder: plat.zOrder,
+        fillColor: plat.fillColor,
+        edgeColor: plat.edgeColor,
+      }
+      editCourse.platforms.splice(pi + 1, 0, copy)
+      selectedPlatIdx = pi + 1
+      emit(); rebuild()
+    })
+    const del = mkBtn('×', () => {
+      editCourse.platforms.splice(pi, 1)
+      if (selectedPlatIdx === pi) selectedPlatIdx = null
+      else if (selectedPlatIdx !== null && selectedPlatIdx > pi) selectedPlatIdx--
+      emit(); rebuild()
+    }, 'del-btn')
+    hdr.append(name, dup, del); el.appendChild(hdr)
+
+    // Z-order toggle
+    const zRow = document.createElement('div'); zRow.className = 'slider-row'
+    const zLbl = document.createElement('span'); zLbl.className = 'slider-label'; zLbl.textContent = 'Layer'
+    const frontBtn = mkBtn('Front', () => { plat.zOrder = 'front'; emit(); rebuild() })
+    const backBtn  = mkBtn('Back',  () => { plat.zOrder = 'back';  emit(); rebuild() })
+    frontBtn.style.cssText += ';padding:2px 10px;font-size:11px'
+    backBtn.style.cssText  += ';padding:2px 10px;font-size:11px'
+    frontBtn.style.opacity = plat.zOrder === 'front' ? '1' : '0.4'
+    backBtn.style.opacity  = plat.zOrder === 'back'  ? '1' : '0.4'
+    zRow.append(zLbl, frontBtn, backBtn); el.appendChild(zRow)
+
+    el.appendChild(colorRow('Fill',   plat.fillColor || PLAT_FILL_DEFAULT, v => { plat.fillColor = v; emit() }))
+    el.appendChild(colorRow('Edge',   plat.edgeColor || PLAT_EDGE_DEFAULT, v => { plat.edgeColor = v; emit() }))
+
+    const ptCount = document.createElement('div')
+    ptCount.style.cssText = 'font:11px monospace;color:#666;padding:2px 0 4px 0'
+    ptCount.textContent = `${plat.points.length} vertices  (click preview to edit)`
+    el.appendChild(ptCount)
+
+    return el
+  }
+
   function buildThemeSection() {
     const { sec, content } = mksec('Theme & Colors', true)
     const th = editCourse.theme
@@ -912,6 +1537,10 @@ export function initEditor(opts: {
   return {
     show() {
       editCourse = structuredClone(opts.getCourse())
+      selectedBunkerIdx = null; selectedPlatIdx = null
+      undoStack = []; redoStack = []
+      lastEmittedCourse = structuredClone(editCourse)
+      syncUndoRedoBtns()
       if (viewMode === 'game') initGameCamera()
       rebuild()
       overlay.style.display = 'flex'

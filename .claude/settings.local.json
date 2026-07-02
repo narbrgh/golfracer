@@ -23,7 +23,9 @@
       "Bash(node drive2.mjs)",
       "Bash(node drive3.mjs)",
       "Bash(node /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/bc1a4078-dc11-4d4f-bf2d-8b6e8c249485/scratchpad/repro.mjs)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(xargs -r kill -9)",
+      "Bash(nohup go run .)"
     ]
   }
 }

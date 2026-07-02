@@ -37,6 +37,12 @@ const (
 	sinkDepth      = 40.0
 
 	holeHoldTicks = 180
+
+	// Bunker rim material: very low restitution (rarely bounces) and low
+	// tangential retention (the ball's sideways speed is killed on contact),
+	// giving a sticky-sand landing.
+	bunkerRestitution = 0.05
+	bunkerBounceFric  = 0.35
 )
 
 var upgrader = websocket.Upgrader{
@@ -141,14 +147,63 @@ func main() {
 		inGap := func(x float64) bool {
 			return x >= holeL && x <= holeR
 		}
-		edges := make([]physics.Edge, 0, int(currentCourse.WorldW/step)+8)
-		prevX, prevY := 0.0, cty(0)
-		for x := step; x <= currentCourse.WorldW; x += step {
-			y := cty(x)
-			if !inGap(prevX) && !inGap(x) {
-				edges = append(edges, physics.NewEdge(prevX, prevY, x, y))
+
+		// Bunker spline data, precomputed for the merged-surface pass below.
+		type bunkerSurf struct {
+			coeffs        []terrain.SplineCoeff
+			leftX, rightX float64
+		}
+		var bunkerSurfs []bunkerSurf
+		for _, b := range currentCourse.Bunkers {
+			if len(b.TopEdge) < 2 {
+				continue
 			}
-			prevX, prevY = x, y
+			coeffs := terrain.BuildSpline(b.TopEdge)
+			leftX, rightX := b.TopEdge[0].X, b.TopEdge[0].X
+			for _, p := range b.TopEdge {
+				if p.X < leftX {
+					leftX = p.X
+				}
+				if p.X > rightX {
+					rightX = p.X
+				}
+			}
+			bunkerSurfs = append(bunkerSurfs, bunkerSurf{coeffs, leftX, rightX})
+		}
+
+		// surfaceAt returns the collision-surface Y at x and whether that surface
+		// is sand. The ball always rolls on ONE continuous surface: the terrain,
+		// lifted up to the sand top (rim spline) wherever a bunker's rim sits
+		// above the ground. This replaces the terrain edges inside a bunker with
+		// the sand-top line, so there is never a floating rim edge above a
+		// separate terrain floor — which is what let a ball get caught between
+		// the two and be ejected (endless bounce) or slip through (fall-through).
+		surfaceAt := func(x float64) (y float64, sand bool) {
+			y = cty(x)
+			for _, bs := range bunkerSurfs {
+				if x < bs.leftX || x > bs.rightX {
+					continue
+				}
+				if ry := terrain.SplineY(x, bs.coeffs); ry < y {
+					y, sand = ry, true
+				}
+			}
+			return
+		}
+
+		edges := make([]physics.Edge, 0, int(currentCourse.WorldW/step)+8)
+		prevX, prevY, prevSand := 0.0, 0.0, false
+		prevY, prevSand = surfaceAt(0)
+		for x := step; x <= currentCourse.WorldW; x += step {
+			y, sand := surfaceAt(x)
+			if !inGap(prevX) && !inGap(x) {
+				if prevSand || sand {
+					edges = append(edges, physics.NewEdgeMat(prevX, prevY, x, y, bunkerRestitution, bunkerBounceFric))
+				} else {
+					edges = append(edges, physics.NewEdge(prevX, prevY, x, y))
+				}
+			}
+			prevX, prevY, prevSand = x, y, sand
 		}
 		addTee := func(teeX float64) {
 			y := cty(teeX) - teeH
@@ -162,9 +217,51 @@ func main() {
 		// real ground and the water penalty fires the moment it sinks below a trap's
 		// pooled surface (see the game loop).
 
+		// Static platform edges. EnsureCW normalises winding so NewEdge outward
+		// normals always point away from the platform interior.
+		for _, plat := range currentCourse.Platforms {
+			if len(plat.Points) < 3 {
+				continue
+			}
+			pts := terrain.EnsureCW(plat.Points)
+			for i := 0; i < len(pts); i++ {
+				a, b := pts[i], pts[(i+1)%len(pts)]
+				edges = append(edges, physics.NewEdge(a.X, a.Y, b.X, b.Y))
+			}
+		}
+
 		terrainEdges = edges
 	}
 	rebuildEdges()
+
+	// Precomputed bunker geometry: spline coefficients and X extents.
+	// Rebuilt whenever the course changes, not every tick.
+	type builtBunker struct {
+		coeffs        []terrain.SplineCoeff
+		leftX, rightX float64
+		b             terrain.Bunker
+	}
+	var builtBunkers []builtBunker
+	rebuildBunkers := func() {
+		builtBunkers = nil
+		for _, b := range currentCourse.Bunkers {
+			if len(b.TopEdge) < 2 {
+				continue
+			}
+			coeffs := terrain.BuildSpline(b.TopEdge)
+			leftX, rightX := b.TopEdge[0].X, b.TopEdge[0].X
+			for _, p := range b.TopEdge {
+				if p.X < leftX {
+					leftX = p.X
+				}
+				if p.X > rightX {
+					rightX = p.X
+				}
+			}
+			builtBunkers = append(builtBunkers, builtBunker{coeffs, leftX, rightX, b})
+		}
+	}
+	rebuildBunkers()
 
 	startY := func() float64 { return cty(currentCourse.TeeBackX) - teeH - 10 }
 	ball := physics.NewBall(currentCourse.TeeBackX, startY(), 10)
@@ -179,6 +276,35 @@ func main() {
 	penaltyX      := 0.0
 	penaltyY      := 0.0
 	lastNonWaterX := currentCourse.TeeBackX
+
+	// Bunker state: depth is captured as ball.VY at first entry (downward component).
+	inBunker    := false
+	bunkerDepth := 0.0   // 0 = shallow, 1 = deep
+	activeBunker := builtBunker{}
+
+	// Soft-lock diagnostics: if the ball stays not-resting but confined to a
+	// small region (frozen OR bouncing in place) for a sustained window, dump
+	// the exact ball state + nearby edges so the geometry can be reproduced.
+	slMinX, slMaxX := 0.0, 0.0
+	slMinY, slMaxY := 0.0, 0.0
+	slWinTicks := 0
+	slDumped := false
+
+	ballInBunker := func() (bool, builtBunker) {
+		for _, bb := range builtBunkers {
+			if ball.X < bb.leftX || ball.X > bb.rightX {
+				continue
+			}
+			topY    := terrain.SplineY(ball.X, bb.coeffs)
+			groundY := cty(ball.X)
+			// In screen coords Y increases downward, so "rim above terrain"
+			// means topY < groundY (smaller Y = higher on screen).
+			if topY < groundY {
+				return true, bb
+			}
+		}
+		return false, builtBunker{}
+	}
 
 	h := &hub{clients: make(map[*websocket.Conn]struct{})}
 
@@ -240,12 +366,38 @@ func main() {
 					hi := ball.X + ball.Radius + 4
 					var nearby []physics.Edge
 					for _, e := range terrainEdges {
-						if e.X1 < lo || e.X0 > hi {
+						// Use min/max so edges going right→left (e.g. the bottom
+						// face of a CW-wound platform polygon) are not skipped.
+						xMin, xMax := e.X0, e.X1
+						if xMin > xMax {
+							xMin, xMax = xMax, xMin
+						}
+						if xMax < lo || xMin > hi {
 							continue
 						}
 						nearby = append(nearby, e)
 					}
 					ball.Tick(subDt, nearby, 0, currentCourse.WorldW, 0)
+
+					// Bunker: the rim is now a real physics surface (edges added in
+					// rebuildEdges), so the ball naturally bounces/rests on it
+					// via ball.Tick. We only need to detect the first contact to
+					// capture depth (entry speed), then track inBunker for the
+					// shot-velocity multiplier.
+					nowIn, bb := ballInBunker()
+					if nowIn && !inBunker {
+						speed := math.Hypot(ball.VX, ball.VY)
+						thresh := bb.b.DeepThreshold
+						if thresh <= 0 {
+							thresh = 300
+						}
+						bunkerDepth = math.Min(speed/thresh, 1.0)
+						activeBunker = bb
+						inBunker = true
+					}
+					if !nowIn {
+						inBunker = false
+					}
 
 					if !inAnyWater(ball.X) {
 						lastNonWaterX = ball.X
@@ -289,6 +441,40 @@ func main() {
 					inHoleTicks = holeHoldTicks
 					state = ballState{X: ball.X, Y: ball.Y, Resting: true, InHole: true}
 				} else {
+					// Soft-lock diagnostic: track the ball's bounding box while it's
+					// not resting. If it stays confined to a small region (frozen OR
+					// bouncing in place) across a 2s window, dump the geometry once.
+					if ball.Resting {
+						slWinTicks = 0
+						slDumped = false
+					} else {
+						if slWinTicks == 0 {
+							slMinX, slMaxX, slMinY, slMaxY = ball.X, ball.X, ball.Y, ball.Y
+						} else {
+							slMinX = math.Min(slMinX, ball.X); slMaxX = math.Max(slMaxX, ball.X)
+							slMinY = math.Min(slMinY, ball.Y); slMaxY = math.Max(slMaxY, ball.Y)
+						}
+						slWinTicks++
+						if slWinTicks >= 120 {
+							if slMaxX-slMinX < 60 && slMaxY-slMinY < 60 && !slDumped {
+								slDumped = true
+								log.Printf("SOFTLOCK ball=(%.2f,%.2f) v=(%.2f,%.2f) bbox=(%.1fx%.1f) inBunker=%v", ball.X, ball.Y, ball.VX, ball.VY, slMaxX-slMinX, slMaxY-slMinY, inBunker)
+								lo := slMinX - ball.Radius - 8
+								hi := slMaxX + ball.Radius + 8
+								for _, e := range terrainEdges {
+									xMin, xMax := e.X0, e.X1
+									if xMin > xMax {
+										xMin, xMax = xMax, xMin
+									}
+									if xMax < lo || xMin > hi {
+										continue
+									}
+									log.Printf("  EDGE (%.2f,%.2f)->(%.2f,%.2f) N=(%.3f,%.3f) rest=%.2f bfric=%.2f", e.X0, e.Y0, e.X1, e.Y1, e.NX, e.NY, e.Restitution, e.BounceFric)
+								}
+							}
+							slWinTicks = 0 // start a fresh window
+						}
+					}
 					state = ballState{X: ball.X, Y: ball.Y, Resting: ball.Resting}
 				}
 			}
@@ -321,7 +507,16 @@ func main() {
 				ballMu.Lock()
 				if inHoleTicks == 0 && inWaterTicks == 0 {
 					penaltyFrozen = false
-					ball.Shoot(msg.VX, msg.VY)
+					vx, vy := msg.VX, msg.VY
+					if inBunker {
+						b := activeBunker.b
+						shallow, deep := b.ShallowMult, b.DeepMult
+						if shallow == 0 { shallow = 0.75 }
+						if deep    == 0 { deep    = 0.25 }
+						mult := shallow + (deep-shallow)*bunkerDepth
+						vx *= mult; vy *= mult
+					}
+					ball.Shoot(vx, vy)
 				}
 				ballMu.Unlock()
 			case "course":
@@ -331,19 +526,19 @@ func main() {
 					currentCourse = c
 					builtSegs = terrain.BuildSegments(c)
 					splineCoeffs = terrain.BuildSpline(c.ControlPoints)
-					rebuildEdges() // recomputes water traps from the new course
-					// The old ball position was computed for the previous terrain and
-					// may now sit underground or mid-air, so drop it back on the tee
-					// the same way "reset" does.
+					rebuildBunkers()  // must run before rebuildEdges so rim edges use current data
+					rebuildEdges()    // recomputes water traps + bunker rim edges
 					inHoleTicks, sinkTicks, inWaterTicks, penaltyFrozen = 0, 0, 0, false
+					inBunker, bunkerDepth = false, 0
 					ball = physics.NewBall(currentCourse.TeeBackX, startY(), 10)
 					lastNonWaterX = currentCourse.TeeBackX
-					log.Printf("course updated: segments=%d points=%d worldW=%.0f", len(c.Segments), len(c.ControlPoints), c.WorldW)
+					log.Printf("course updated: segments=%d points=%d worldW=%.0f bunkers=%d", len(c.Segments), len(c.ControlPoints), c.WorldW, len(c.Bunkers))
 					ballMu.Unlock()
 				}
 			case "reset":
 				ballMu.Lock()
 				inHoleTicks = 0; sinkTicks = 0; inWaterTicks = 0; penaltyFrozen = false
+				inBunker, bunkerDepth = false, 0
 				teeX := currentCourse.TeeBackX
 				if msg.Tee == "forward" {
 					teeX = currentCourse.TeeForwardX

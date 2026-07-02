@@ -1,5 +1,5 @@
-import { buildSegments, terrainY, DEFAULT_COURSE, hexWithAlpha, buildSpline, splineY, waterPoolBounds } from './terrain'
-import type { Course, BuiltSegment, SplineCoeff } from './terrain'
+import { buildSegments, terrainY, DEFAULT_COURSE, hexWithAlpha, buildSpline, splineY, waterPoolBounds, ensureCW } from './terrain'
+import type { Course, BuiltSegment, SplineCoeff, Platform } from './terrain'
 import { initEditor } from './editor'
 
 // ---- Canvas / render constants ----
@@ -59,11 +59,51 @@ function rebuildWaterPools() {
 }
 rebuildWaterPools()
 
+// ---- Bunker pool cache ----
+// Like water pools: rebuilt once per course change, not every frame.
+// Fill path = Catmull-Rom spline top → terrain surface back (closed).
+const BUNKER_FILL   = 'rgba(210,185,100,0.88)'
+const BUNKER_STROKE = 'rgba(155,130,40,0.9)'
+
+// Same draw-before-terrain trick as water: fill from the spline rim straight
+// down to worldH. The terrain fill (drawn after) covers everything below the
+// terrain surface, so only the above-terrain sand shows — no complex segment
+// clipping needed, and cliff faces are automatically hidden.
+interface BunkerPool { coeffs: SplineCoeff[]; leftX: number; rightX: number; fillPath: Path2D; rimPath: Path2D }
+let bunkerPools: BunkerPool[] = []
+
+function rebuildBunkerPools() {
+  bunkerPools = []
+  for (const b of course.bunkers) {
+    if (b.topEdge.length < 2) continue
+    const coeffs = buildSpline(b.topEdge)
+    const leftX  = Math.min(...b.topEdge.map(p => p.x))
+    const rightX = Math.max(...b.topEdge.map(p => p.x))
+
+    const fill = new Path2D()
+    fill.moveTo(leftX, splineY(leftX, coeffs))
+    for (let x = leftX + 5; x < rightX; x += 5) fill.lineTo(x, splineY(x, coeffs))
+    fill.lineTo(rightX, splineY(rightX, coeffs))
+    fill.lineTo(rightX, course.worldH)
+    fill.lineTo(leftX,  course.worldH)
+    fill.closePath()
+
+    // Rim stroke is just the spline — terrain drawn on top covers underground parts.
+    const rim = new Path2D()
+    rim.moveTo(leftX, splineY(leftX, coeffs))
+    for (let x = leftX + 5; x <= rightX; x += 5) rim.lineTo(x, splineY(x, coeffs))
+
+    bunkerPools.push({ coeffs, leftX, rightX, fillPath: fill, rimPath: rim })
+  }
+}
+rebuildBunkerPools()
+
 function updateCourse(c: Course) {
   course = c
   builtSegs = buildSegments(c)
   splineCoeffs = buildSpline(c.controlPoints)
   rebuildWaterPools()
+  rebuildBunkerPools()
 }
 
 // ---- DOM setup ----
@@ -164,18 +204,33 @@ function drawWater() {
   }
 }
 
+function drawBunkers() {
+  for (const { fillPath, rimPath } of bunkerPools) {
+    ctx.fillStyle = BUNKER_FILL; ctx.fill(fillPath)
+    ctx.strokeStyle = BUNKER_STROKE; ctx.lineWidth = 2; ctx.stroke(rimPath)
+  }
+}
+
+function drawPlatforms(which: Platform['zOrder']) {
+  for (const plat of course.platforms) {
+    if (plat.zOrder !== which || plat.points.length < 3) continue
+    const pts = ensureCW(plat.points)
+    ctx.beginPath()
+    ctx.moveTo(pts[0].x, pts[0].y)
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y)
+    ctx.closePath()
+    ctx.fillStyle = plat.fillColor || '#f5d800'; ctx.fill()
+    ctx.strokeStyle = plat.edgeColor || '#b8a000'; ctx.lineWidth = 2; ctx.stroke()
+  }
+}
+
 function drawHazards() {
   for (const hz of course.hazards) {
-    if (hz.kind === 'water') continue
+    if (hz.kind !== 'tree') continue  // only trees remain (sand replaced by bunkers, water handled separately)
     const ty = tY(hz.cx)
-    if (hz.kind === 'sand') {
-      ctx.fillStyle = 'rgba(210,185,100,0.72)'
-      ctx.beginPath(); ctx.ellipse(hz.cx, ty - hz.h / 2, hz.w / 2, hz.h / 2, 0, 0, Math.PI * 2); ctx.fill()
-    } else if (hz.kind === 'tree') {
-      ctx.fillStyle = '#5a3510'; ctx.fillRect(hz.cx - 4, ty - hz.h, 8, hz.h)
-      ctx.fillStyle = '#1e5218'
-      ctx.beginPath(); ctx.arc(hz.cx, ty - hz.h - hz.w * 0.15, hz.w / 2, 0, Math.PI * 2); ctx.fill()
-    }
+    ctx.fillStyle = '#5a3510'; ctx.fillRect(hz.cx - 4, ty - hz.h, 8, hz.h)
+    ctx.fillStyle = '#1e5218'
+    ctx.beginPath(); ctx.arc(hz.cx, ty - hz.h - hz.w * 0.15, hz.w / 2, 0, Math.PI * 2); ctx.fill()
   }
 }
 
@@ -334,6 +389,7 @@ function draw() {
   ctx.fillRect(0, 0, course.worldW, course.worldH)
 
   drawSunAndMountains()
+  drawPlatforms('back')
 
   // Water is drawn before the ground, as a plain rectangle — the ground fill
   // (opaque all the way down to worldH) then paints over whatever part of
@@ -341,7 +397,10 @@ function draw() {
   // exactly follows the terrain's actual contour for free, without the water
   // code needing to trace it, and without a fixed-width pool ever drawing a
   // hard, unnaturally straight edge into a slope.
+  // Water and bunkers drawn before terrain — terrain fill covers their underground
+  // portions, leaving only the above-surface region visible. Same painter trick.
   drawWater()
+  drawBunkers()
 
   const cuts = buildCutouts()
 
@@ -368,6 +427,7 @@ function draw() {
   ctx.fillStyle = '#ffffff'
   for (const tx of [course.teeBackX, course.teeForwardX]) ctx.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
 
+  drawPlatforms('front')
   drawHazards()
 
   const flagBaseX = course.holeX + HOLE_W / 2, flagBaseY = tY(course.holeX + HOLE_W / 2)
@@ -607,6 +667,8 @@ if (saved) {
       ...DEFAULT_COURSE,
       ...parsed,
       controlPoints: parsed.controlPoints ?? DEFAULT_COURSE.controlPoints,
+      bunkers: parsed.bunkers ?? [],
+      platforms: parsed.platforms ?? [],
       theme: { ...DEFAULT_COURSE.theme, ...(parsed.theme ?? {}) },
     })
   } catch { /* ignore bad JSON */ }

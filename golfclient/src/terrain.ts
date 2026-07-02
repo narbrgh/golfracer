@@ -113,7 +113,55 @@ export interface TerrainSegment {
   waves: TerrainWave[]
 }
 
-export type HazardKind = 'sand' | 'water' | 'tree'
+export type HazardKind = 'water' | 'sand' | 'tree'  // 'sand'/'tree' are legacy; bunkers replace them
+
+// ---- Bunkers ----
+
+export interface Bunker {
+  topEdge: Pt[]           // Catmull-Rom control points for the rim (sorted by x)
+  friction: number        // rolling-friction multiplier while in bunker (default 4)
+  shallowMult: number     // shot-velocity multiplier at depth 0 (default 0.75)
+  deepMult: number        // shot-velocity multiplier at depth 1 (default 0.25)
+  deepThreshold: number   // downward px/s at entry that maps to depth=1 (default 300)
+}
+
+// ---- Platforms ----
+
+export interface Pt { x: number; y: number }
+
+export interface Platform {
+  points: Pt[]
+  zOrder: 'front' | 'back'  // front = above terrain, back = behind terrain
+  fillColor: string
+  edgeColor: string
+}
+
+// Signed area of a polygon in screen/Y-down coordinates.
+// Positive → clockwise (CW) on screen, which is what NewEdge expects for
+// correct outward normals (right-perpendicular of each edge direction).
+export function polySignedArea(pts: Pt[]): number {
+  let a = 0
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length
+    a += pts[i].x * pts[j].y - pts[j].x * pts[i].y
+  }
+  return a / 2
+}
+
+// Returns pts in CW order (positive signed area) so physics normals are correct.
+export function ensureCW(pts: Pt[]): Pt[] {
+  return polySignedArea(pts) >= 0 ? pts : [...pts].reverse()
+}
+
+// Point-in-polygon test (ray casting).
+export function pointInPoly(x: number, y: number, pts: Pt[]): boolean {
+  let inside = false
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, yi = pts[i].y, xj = pts[j].x, yj = pts[j].y
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside
+  }
+  return inside
+}
 
 // A hazard is positioned in world coordinates and lives on the Course so it's
 // editable and saved/loaded with the map.
@@ -179,6 +227,8 @@ export interface Course {
   useWaves: boolean
   segments: TerrainSegment[]
   hazards: Hazard[]
+  bunkers: Bunker[]
+  platforms: Platform[]
   theme: CourseTheme
 }
 
@@ -261,9 +311,9 @@ export const DEFAULT_COURSE: Course = {
     ]
   }],
   hazards: [
-    { kind: 'sand',  cx:  900, w: 180, h: 14 },
     { kind: 'water', cx: 2080, w: 0, h: 0, level: 715 },
-    { kind: 'sand',  cx: 3150, w: 160, h: 14 },
   ],
+  bunkers: [],
+  platforms: [],
   theme: DEFAULT_THEME,
 }

@@ -148,6 +148,55 @@ type TerrainSegment struct {
 	Waves  []TerrainWave `json:"waves"`
 }
 
+// Bunker is a sand trap whose visible region sits between a user-drawn
+// Catmull-Rom top edge (the rim/lip) and the terrain surface below it.
+// When the ball is inside the bunker it experiences extra rolling friction;
+// when shot out, the launch velocity is scaled by a multiplier that depends
+// on how steeply the ball entered (depth factor captured at entry).
+type Bunker struct {
+	TopEdge       []ControlPoint `json:"topEdge"`
+	Friction      float64        `json:"friction"`      // rolling-friction multiplier (default 4)
+	ShallowMult   float64        `json:"shallowMult"`   // shot multiplier at depth=0 (default 0.75)
+	DeepMult      float64        `json:"deepMult"`      // shot multiplier at depth=1 (default 0.25)
+	DeepThreshold float64        `json:"deepThreshold"` // VY px/s that maps to depth=1 (default 300)
+}
+
+// Platform is a convex or concave polygon that the ball can bounce off.
+// ZOrder controls rendering: "front" draws above terrain, "back" draws behind it.
+// Points should be stored in the order the editor produced them; EnsureCW
+// normalises winding for physics before building edges.
+type Platform struct {
+	Points    []ControlPoint `json:"points"`
+	ZOrder    string         `json:"zOrder"` // "front" | "back"
+	FillColor string         `json:"fillColor"`
+	EdgeColor string         `json:"edgeColor"`
+}
+
+// PolySignedArea returns the signed area of a polygon in screen/Y-down
+// coordinates. Positive → clockwise (CW) on screen.
+func PolySignedArea(pts []ControlPoint) float64 {
+	a := 0.0
+	n := len(pts)
+	for i := 0; i < n; i++ {
+		j := (i + 1) % n
+		a += pts[i].X*pts[j].Y - pts[j].X*pts[i].Y
+	}
+	return a / 2
+}
+
+// EnsureCW returns pts in CW winding order (positive signed area in screen
+// coords) so physics.NewEdge outward normals point away from the platform.
+func EnsureCW(pts []ControlPoint) []ControlPoint {
+	if PolySignedArea(pts) >= 0 {
+		return pts
+	}
+	rev := make([]ControlPoint, len(pts))
+	for i, p := range pts {
+		rev[len(pts)-1-i] = p
+	}
+	return rev
+}
+
 // Hazard is positioned and sized in world coordinates. Water is a flood-fill:
 // the body floods outward from the anchor (CX) until the terrain rises above
 // Level, conforming to whatever valley it sits in (see WaterPoolBounds); W/H
@@ -208,6 +257,8 @@ type Course struct {
 	UseWaves      bool             `json:"useWaves"`
 	Segments      []TerrainSegment `json:"segments"`
 	Hazards       []Hazard         `json:"hazards"`
+	Bunkers       []Bunker         `json:"bunkers"`
+	Platforms     []Platform       `json:"platforms"`
 	Theme         CourseTheme      `json:"theme"`
 }
 
@@ -296,11 +347,9 @@ func DefaultCourse() Course {
 				{Amplitude: 20, Period: 150, Phase: 0},
 			},
 		}},
-		Hazards: []Hazard{
-			{Kind: "sand", CX: 900, W: 180, H: 14},
-			{Kind: "water", CX: 2080, Level: 715},
-			{Kind: "sand", CX: 3150, W: 160, H: 14},
-		},
+		Hazards:   []Hazard{{Kind: "water", CX: 2080, Level: 715}},
+		Bunkers:   []Bunker{},
+		Platforms: []Platform{},
 		Theme: CourseTheme{
 			SkyTop:      "#07071a",
 			SkyBottom:   "#111125",
