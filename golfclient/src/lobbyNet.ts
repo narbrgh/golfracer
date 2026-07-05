@@ -89,8 +89,17 @@ export class LobbyNet {
     this.handlers = handlers
   }
 
+  private defaultWsUrl(): string {
+    const { protocol, host } = window.location
+    const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${wsProtocol}//${host}/ws`
+  }
+
   connect(): void {
-    const ws = new WebSocket('ws://localhost:8080/lobby')
+    const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined
+    let url = envUrl && envUrl.trim().length > 0 ? envUrl : this.defaultWsUrl()
+    url = url.replace('/ws', '/lobby')
+    const ws = new WebSocket(url)
     this.ws = ws
     ws.onmessage = (e) => this.onMessage(JSON.parse(e.data))
   }

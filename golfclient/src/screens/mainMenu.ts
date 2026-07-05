@@ -5,6 +5,7 @@ export interface MainMenuHandlers {
   onSinglePlayer: () => void
   onOnline: () => void
   onEditor: () => void
+  onKen: () => void
 }
 
 // Retro-sunset hero, styled after the beer-can artwork: clean flat horizontal
@@ -66,6 +67,7 @@ export function createMainMenu(handlers: MainMenuHandlers): Screen {
             <button class="mm-btn mm-single" type="button" data-action="single">Single Player</button>
             <button class="mm-btn mm-online" type="button" data-action="online">Online</button>
             <button class="mm-btn mm-editor" type="button" data-action="editor">Map Editor</button>
+            <button class="mm-btn mm-ken" type="button" data-action="ken">Ken</button>
           </div>
         </div>`
       const on = (action: string, fn: () => void) =>
@@ -73,6 +75,7 @@ export function createMainMenu(handlers: MainMenuHandlers): Screen {
       on('single', handlers.onSinglePlayer)
       on('online', handlers.onOnline)
       on('editor', handlers.onEditor)
+      on('ken', handlers.onKen)
       return root
     },
   }

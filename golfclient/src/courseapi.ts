@@ -5,9 +5,13 @@
 import type { Course, Hole } from './terrain'
 import { DEFAULT_HOLE, CURRENT_FORMAT_VERSION } from './terrain'
 
-// HTTP base for the Go server. The WebSocket uses ws://localhost:8080/ws; the
-// course API lives on the same origin.
-const BASE = 'http://localhost:8080'
+// HTTP base for the Go server. The WebSocket uses the same origin.
+function getApiBase(): string {
+  const envUrl = (import.meta as any).env?.VITE_API_URL as string | undefined
+  if (envUrl && envUrl.trim().length > 0) return envUrl
+  return `${window.location.protocol}//${window.location.host}`
+}
+const BASE = getApiBase()
 
 export interface CourseInfo {
   id: string

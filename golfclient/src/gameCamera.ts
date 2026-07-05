@@ -1,0 +1,300 @@
+// GameCamera — shared camera + outer-chrome module for both single-player
+// (main.ts) and multiplayer (screens/matchScreen.ts). Renderer-agnostic (no
+// DOM, no network) — same pattern as SwingEngine in swing.ts. Owns camera
+// state/math and minimap-frame drawing; per-screen content (terrain, balls,
+// parabola, etc.) is drawn by the caller via the drawContent callback.
+//
+// mountGameChrome() builds the actual DOM (wrap/canvas/hud/free-look-arrows/
+// hamburger menu) both screens share, so the two GUIs can't drift apart again.
+
+export type CamMode = 'follow' | 'free'
+
+export interface GameCameraConfig {
+  minZoom?: number
+  maxZoom?: number
+  followLerp?: number
+  followBiasY?: number // fraction of viewport height the follow target sits down from the top
+  panStep?: number      // screen px/frame per held arrow key, in free-look
+}
+
+function clamp(v: number, lo: number, hi: number): number { return Math.max(lo, Math.min(hi, v)) }
+
+export class GameCamera {
+  cw = 0
+  ch = 0
+  camX = 0
+  camY = 0
+  zoom = 1
+  mode: CamMode = 'follow'
+
+  private worldW = 1
+  private worldH = 1
+  private held = new Set<string>()
+  private cfg: Required<GameCameraConfig>
+
+  constructor(cfg: GameCameraConfig = {}) {
+    this.cfg = {
+      minZoom: cfg.minZoom ?? 0.35,
+      maxZoom: cfg.maxZoom ?? 2.5,
+      followLerp: cfg.followLerp ?? 0.2,
+      followBiasY: cfg.followBiasY ?? 0.6,
+      panStep: cfg.panStep ?? 14,
+    }
+  }
+
+  setWorld(worldW: number, worldH: number) {
+    this.worldW = worldW; this.worldH = worldH
+    this.clampCam()
+  }
+
+  resize(cw: number, ch: number) {
+    this.cw = cw; this.ch = ch
+    this.clampCam()
+  }
+
+  worldToScreen(wx: number, wy: number) { return { sx: (wx - this.camX) * this.zoom, sy: (wy - this.camY) * this.zoom } }
+  screenToWorld(sx: number, sy: number) { return { wx: this.camX + sx / this.zoom, wy: this.camY + sy / this.zoom } }
+
+  clampCam() {
+    const visW = this.cw / this.zoom, visH = this.ch / this.zoom
+    this.camX = this.worldW <= visW ? (this.worldW - visW) / 2 : clamp(this.camX, 0, this.worldW - visW)
+    this.camY = this.worldH <= visH ? (this.worldH - visH) / 2 : clamp(this.camY, 0, this.worldH - visH)
+  }
+
+  enterFreeLook() {
+    if (this.mode === 'free') return
+    this.mode = 'free'
+  }
+  exitFreeLook() {
+    if (this.mode === 'follow') return
+    this.mode = 'follow'
+    this.zoom = 1 // revert to the ball at normal zoom
+    this.held.clear()
+  }
+  toggleFreeLook() { this.mode === 'free' ? this.exitFreeLook() : this.enterFreeLook() }
+
+  zoomAt(screenX: number, screenY: number, factor: number) {
+    const { wx, wy } = this.screenToWorld(screenX, screenY)
+    this.zoom = clamp(this.zoom * factor, this.cfg.minZoom, this.cfg.maxZoom)
+    this.camX = wx - screenX / this.zoom
+    this.camY = wy - screenY / this.zoom
+    this.clampCam()
+  }
+
+  /** Call once per frame. followTarget is the world point to track in follow mode (null if there's nothing to follow yet). */
+  update(followTarget: { x: number; y: number } | null) {
+    const visW = this.cw / this.zoom, visH = this.ch / this.zoom
+    if (this.mode === 'follow') {
+      if (!followTarget) return
+      let tx = followTarget.x - visW / 2
+      let ty = followTarget.y - visH * this.cfg.followBiasY
+      tx = this.worldW <= visW ? (this.worldW - visW) / 2 : clamp(tx, 0, this.worldW - visW)
+      ty = this.worldH <= visH ? (this.worldH - visH) / 2 : clamp(ty, 0, this.worldH - visH)
+      this.camX += (tx - this.camX) * this.cfg.followLerp
+      this.camY += (ty - this.camY) * this.cfg.followLerp
+    } else {
+      const step = this.cfg.panStep / this.zoom
+      if (this.held.has('ArrowLeft')) this.camX -= step
+      if (this.held.has('ArrowRight')) this.camX += step
+      if (this.held.has('ArrowUp')) this.camY -= step
+      if (this.held.has('ArrowDown')) this.camY += step
+      this.clampCam()
+    }
+  }
+
+  /** Hard snap (no lerp) — hole load, water-penalty relocate, hole reset. */
+  centerOn(wx: number, wy: number) {
+    const visW = this.cw / this.zoom, visH = this.ch / this.zoom
+    this.camX = this.worldW <= visW ? (this.worldW - visW) / 2 : clamp(wx - visW / 2, 0, this.worldW - visW)
+    this.camY = this.worldH <= visH ? (this.worldH - visH) / 2 : clamp(wy - visH * this.cfg.followBiasY, 0, this.worldH - visH)
+  }
+
+  /** Edge-arrow-button panning, free-look only. */
+  nudge(dir: 'up' | 'down' | 'left' | 'right') {
+    const s = 90 / this.zoom
+    if (dir === 'up') this.camY -= s
+    else if (dir === 'down') this.camY += s
+    else if (dir === 'left') this.camX -= s
+    else this.camX += s
+    this.clampCam()
+  }
+
+  /** Left-drag panning in free-look — dx/dy are screen-space deltas. */
+  panBy(dxScreen: number, dyScreen: number) {
+    this.camX -= dxScreen / this.zoom
+    this.camY -= dyScreen / this.zoom
+    this.clampCam()
+  }
+
+  /**
+   * Enter/M toggles free-look both ways. Arrows enter free-look and start
+   * panning. Space only ever exits free-look (back to Hit/follow mode) — it
+   * does NOT enter free-look, so when already in follow mode this returns
+   * false, leaving Space free for the caller to use as its own shortcut
+   * (e.g. the Hit! button). Returns true if the key was consumed.
+   */
+  onKeyDown(e: KeyboardEvent): boolean {
+    if (e.key === 'Enter' || e.key === 'm' || e.key === 'M') { this.toggleFreeLook(); return true }
+    if (e.key === ' ') {
+      if (this.mode === 'free') { this.exitFreeLook(); return true }
+      return false
+    }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      if (this.mode === 'follow') this.enterFreeLook()
+      this.held.add(e.key)
+      return true
+    }
+    return false
+  }
+  onKeyUp(e: KeyboardEvent) { this.held.delete(e.key) }
+
+  // ---- Minimap (top-right) ----
+  miniBox(w = 200, h = 52, pad = 12) { return { x: this.cw - w - pad, y: pad, w, h } }
+
+  miniHit(px: number, py: number): boolean {
+    const b = this.miniBox()
+    return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h
+  }
+
+  miniJump(px: number, py: number) {
+    const b = this.miniBox()
+    const wx = ((px - b.x) / b.w) * this.worldW
+    const wy = ((py - b.y) / b.h) * this.worldH
+    this.camX = wx - this.cw / this.zoom / 2
+    this.camY = wy - this.ch / this.zoom / 2
+    this.clampCam()
+  }
+
+  /** Draws the shared minimap frame (bg/border/camera-viewport rect); drawContent renders per-screen content in between. */
+  drawMinimapFrame(ctx: CanvasRenderingContext2D, drawContent: (mwx: (wx: number) => number, mwy: (wy: number) => number) => void) {
+    const b = this.miniBox()
+    ctx.fillStyle = 'rgba(8,14,20,0.72)'; ctx.fillRect(b.x, b.y, b.w, b.h)
+    ctx.strokeStyle = 'rgba(246,239,206,0.3)'; ctx.lineWidth = 1; ctx.strokeRect(b.x, b.y, b.w, b.h)
+
+    const mwx = (wx: number) => b.x + (wx / this.worldW) * b.w
+    const mwy = (wy: number) => b.y + (wy / this.worldH) * b.h
+    drawContent(mwx, mwy)
+
+    const visW = this.cw / this.zoom, visH = this.ch / this.zoom
+    ctx.strokeStyle = 'rgba(246,239,206,0.75)'; ctx.lineWidth = 1
+    ctx.strokeRect(mwx(this.camX), mwy(this.camY), (visW / this.worldW) * b.w, (visH / this.worldH) * b.h)
+  }
+}
+
+export interface ChromeMenuItem { label: string; onClick: () => void }
+
+export interface GameChromeHandle {
+  root: HTMLElement
+  canvas: HTMLCanvasElement
+  ctx: CanvasRenderingContext2D
+  /** Sets the top-left hole/timer HUD text; null hides the pill entirely. */
+  setHud(text: string | null): void
+  /**
+   * Reflects cam.mode into the arrows/cursor DOM. Call after any of *your own*
+   * input handling that might have changed cam.mode (minimap click, keydown) —
+   * not every frame, since that would fight the transient 'grabbing' cursor a
+   * caller sets during an active pan-drag. mountGameChrome's own
+   * contextmenu/wheel handlers already call this internally.
+   */
+  sync(): void
+  /** Closes the hamburger menu panel if open — call on screen exit. */
+  closeMenu(): void
+  /** Opens/closes the hamburger menu panel — e.g. for an Escape-key shortcut. */
+  toggleMenu(): void
+}
+
+// Builds the wrap/canvas/hud/free-look-arrows/hamburger-menu DOM shared by
+// both screens (see gameChrome.css), and wires it to a GameCamera instance.
+export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
+  menuItems: ChromeMenuItem[]
+  minW?: number
+  minH?: number
+}): GameChromeHandle {
+  const minW = opts.minW ?? 900, minH = opts.minH ?? 560
+
+  const root = document.createElement('div')
+  root.className = 'gc-wrap'
+  root.innerHTML = `
+    <canvas class="gc-canvas"></canvas>
+    <div class="gc-hud" data-hud></div>
+    <div class="free-arrows" data-arrows style="display:none">
+      <div class="free-hint">Free look — Enter, M, Space, or right-click to exit</div>
+      <button class="free-arrow fa-up" data-pan="up">▲</button>
+      <button class="free-arrow fa-down" data-pan="down">▼</button>
+      <button class="free-arrow fa-left" data-pan="left">◀</button>
+      <button class="free-arrow fa-right" data-pan="right">▶</button>
+    </div>
+    <div class="gc-menu">
+      <button class="gc-menu-toggle" data-menu-toggle aria-label="Menu">☰</button>
+      <div class="gc-menu-panel" data-menu-panel style="display:none"></div>
+    </div>`
+  host.appendChild(root)
+
+  const canvas = root.querySelector('canvas')!
+  const ctx = canvas.getContext('2d')!
+  const hudEl = root.querySelector<HTMLElement>('[data-hud]')!
+  const arrowsEl = root.querySelector<HTMLElement>('[data-arrows]')!
+  const menuToggleEl = root.querySelector<HTMLButtonElement>('[data-menu-toggle]')!
+  const menuPanelEl = root.querySelector<HTMLElement>('[data-menu-panel]')!
+
+  for (const item of opts.menuItems) {
+    const btn = document.createElement('button')
+    btn.className = 'gc-item'
+    btn.textContent = item.label
+    btn.addEventListener('click', () => { menuPanelEl.style.display = 'none'; item.onClick() })
+    menuPanelEl.appendChild(btn)
+  }
+  const closeBtn = document.createElement('button')
+  closeBtn.className = 'gc-item gc-item-close'
+  closeBtn.textContent = 'Close Menu'
+  closeBtn.addEventListener('click', () => { menuPanelEl.style.display = 'none' })
+  menuPanelEl.appendChild(closeBtn)
+
+  function toggleMenu() {
+    menuPanelEl.style.display = menuPanelEl.style.display === 'none' ? '' : 'none'
+  }
+  menuToggleEl.addEventListener('click', toggleMenu)
+
+  const nudge = (dir: string) => cam.nudge(dir as 'up' | 'down' | 'left' | 'right')
+  for (const btn of Array.from(arrowsEl.querySelectorAll<HTMLButtonElement>('[data-pan]'))) {
+    btn.addEventListener('click', () => nudge(btn.dataset.pan!))
+  }
+
+  function applySync() {
+    arrowsEl.style.display = cam.mode === 'free' ? '' : 'none'
+    canvas.style.cursor = cam.mode === 'free' ? 'grab' : 'crosshair'
+  }
+  applySync()
+
+  canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); cam.toggleFreeLook(); applySync() })
+  canvas.addEventListener('wheel', (e) => {
+    if (cam.mode !== 'free') return
+    e.preventDefault()
+    const r = canvas.getBoundingClientRect()
+    cam.zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.1 : 1 / 1.1)
+  }, { passive: false })
+
+  function resize() {
+    const cw = Math.max(minW, host.clientWidth || minW)
+    const ch = Math.max(minH, host.clientHeight || minH)
+    canvas.width = cw; canvas.height = ch
+    canvas.style.width = cw + 'px'; canvas.style.height = ch + 'px'
+    root.style.width = cw + 'px'; root.style.height = ch + 'px'
+    cam.resize(cw, ch)
+  }
+  resize()
+  new ResizeObserver(resize).observe(host)
+
+  return {
+    root,
+    canvas,
+    ctx,
+    setHud(text: string | null) {
+      hudEl.style.display = text === null ? 'none' : ''
+      if (text !== null) hudEl.textContent = text
+    },
+    sync: applySync,
+    closeMenu() { menuPanelEl.style.display = 'none' },
+    toggleMenu,
+  }
+}

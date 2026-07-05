@@ -148,9 +148,9 @@
         "skyTop": "#a4eff9",
         "skyBottom": "#ff6a1a",
         "mountain1": "#1c3021",
-        "mountain1Y": 0.55,
+        "mountain1Y": 0.87,
         "mountain2": "#25412f",
-        "mountain2Y": 0.64,
+        "mountain2Y": 0.85,
         "groundFill": "#35921c",
         "groundLine": "#384d23",
         "groundLineW": 3.5,
@@ -160,7 +160,7 @@
         "sunColor": "#e6e600",
         "sunRing1": "#7ad3ff",
         "sunRing2": "#d9d9d9",
-        "sunSize": 32
+        "sunSize": 34
       }
     },
     {

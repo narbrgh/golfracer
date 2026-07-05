@@ -2,16 +2,47 @@ package physics
 
 import "math"
 
-// Tunable constants.
-const (
-	Gravity            = 1500.0 // px/s², downward
-	GroundRestitution  = 0.55   // fraction of normal speed kept after a real bounce
-	BounceFriction     = 0.85   // fraction of tangential speed kept at bounce instant
-	WallRestitution    = 0.65   // fraction of normal speed kept on side/ceiling bounce
-	RollingFriction    = 200.0  // px/s² kinetic deceleration while rolling
-	StaticFriction     = 400.0  // px/s² — max slope-gravity before ball starts sliding
-	RestSpeedThreshold = 8.0    // px/s — below this while touching ground = "at rest"
+// Tunables holds the ball-physics constants that are safe to tweak live, from
+// the client's Ken debug menu, without a server restart. Field values default
+// to the game's original hardcoded numbers (see DefaultTunables). Current is
+// read every tick and mutated by the /physics/config HTTP handler in main —
+// both sides hold ballMu, so plain reads/writes of Current are race-free.
+type Tunables struct {
+	Gravity            float64 `json:"gravity"`            // px/s², downward
+	GroundRestitution  float64 `json:"groundRestitution"`  // fraction of normal speed kept after a real bounce
+	BounceFriction     float64 `json:"bounceFriction"`     // fraction of tangential speed kept at bounce instant
+	WallRestitution    float64 `json:"wallRestitution"`    // fraction of normal speed kept on side/ceiling bounce
+	RollingFriction    float64 `json:"rollingFriction"`    // px/s² kinetic deceleration while rolling
+	StaticFriction     float64 `json:"staticFriction"`     // px/s² — max slope-gravity before ball starts sliding
+	RestSpeedThreshold float64 `json:"restSpeedThreshold"` // px/s — below this while touching ground = "at rest"
+	BunkerFriction     float64 `json:"bunkerFriction"`     // px/s² kinetic deceleration while rolling in a bunker
+	DriverPenalty      float64 `json:"driverPenalty"`      // shot-power multiplier when hitting a driver out of a bunker
+	WedgePenalty       float64 `json:"wedgePenalty"`       // shot-power multiplier when hitting a pitching wedge out of a bunker
+	PutterPenalty      float64 `json:"putterPenalty"`      // shot-power multiplier when hitting a putter out of a bunker
+}
 
+// DefaultTunables returns the game's original hardcoded tuning, used both as
+// the live starting point and as the "default" reference shown in the Ken menu.
+func DefaultTunables() Tunables {
+	return Tunables{
+		Gravity:            1500.0,
+		GroundRestitution:  0.55,
+		BounceFriction:     0.85,
+		WallRestitution:    0.65,
+		RollingFriction:    200.0,
+		StaticFriction:     400.0,
+		RestSpeedThreshold: 8.0,
+		BunkerFriction:     4.0,
+		DriverPenalty:      0.25,
+		WedgePenalty:       0.7,
+		PutterPenalty:      0.5,
+	}
+}
+
+// Current holds the live tunable values used by Tick and NewEdge.
+var Current = DefaultTunables()
+
+const (
 	// RestAccelThreshold: max tick-over-tick velocity change (px/s²) while touching
 	// for the ball to count as "at rest". Using actual measured acceleration rather
 	// than inferring stillness from a single contact edge's slope means a ball
@@ -21,12 +52,12 @@ const (
 	// contacts cancel out and the ball is physically motionless.
 	RestAccelThreshold = 20.0
 
-	// RestStillTime: a ball that has stayed below RestSpeedThreshold while in
+	// RestStillTime: a ball that has stayed below Current.RestSpeedThreshold while in
 	// (or within a couple ticks of) contact for this long is forced to rest even
 	// if the accel check never passes. A ball wedged between two V walls can sit
 	// in a tiny period-2 limit cycle — velocity flips direction every tick between
 	// the two wall tangents, so |Δv|/dt reads as a huge acceleration while the
-	// ball is visually frozen at ~5 px/s. That cycle is below RestSpeedThreshold,
+	// ball is visually frozen at ~5 px/s. That cycle is below Current.RestSpeedThreshold,
 	// so the wedge (blocked-displacement) detector never counts it either; this
 	// timer is what catches it. It cannot false-fire at the apex of an uphill
 	// roll: any slope too steep for StaticFriction (> 400 px/s²) keeps the ball
@@ -83,6 +114,7 @@ type Edge struct {
 	Len            float64
 	Restitution    float64 // normal-speed retention on bounce
 	BounceFric     float64 // tangential-speed retention on bounce
+	Sand           bool    // true for bunker surfaces: rolling friction uses Current.BunkerFriction
 }
 
 // NewEdge builds an Edge from two endpoints with the default (terrain) material.
@@ -90,7 +122,7 @@ type Edge struct {
 // in screen coordinates (Y grows downward), which is what every terrain/platform
 // edge wants.
 func NewEdge(x0, y0, x1, y1 float64) Edge {
-	return NewEdgeMat(x0, y0, x1, y1, GroundRestitution, BounceFriction)
+	return NewEdgeMat(x0, y0, x1, y1, Current.GroundRestitution, Current.BounceFriction)
 }
 
 // NewEdgeMat builds an Edge with an explicit restitution / bounce-friction
@@ -110,6 +142,15 @@ func NewEdgeMat(x0, y0, x1, y1, restitution, bounceFric float64) Edge {
 		Restitution: restitution,
 		BounceFric:  bounceFric,
 	}
+}
+
+// NewSandEdge builds an Edge with an explicit restitution/bounce-friction
+// material and marks it Sand, so Tick applies Current.BunkerFriction instead
+// of Current.RollingFriction while the ball rolls along it.
+func NewSandEdge(x0, y0, x1, y1, restitution, bounceFric float64) Edge {
+	e := NewEdgeMat(x0, y0, x1, y1, restitution, bounceFric)
+	e.Sand = true
+	return e
 }
 
 // circleEdgeContact returns how deep a circle (cx,cy,r) penetrates an edge
@@ -163,12 +204,12 @@ type Ball struct {
 	X, Y           float64
 	VX, VY         float64
 	Radius         float64
-	Resting        bool    // true when speed < RestSpeedThreshold while touching ground
+	Resting        bool    // true when speed < Current.RestSpeedThreshold while touching ground
 	airTicks       int     // consecutive ticks spent off all floor-type surfaces
 	prevTX, prevTY float64 // tangent of the last floor-type edge the ball touched
 	wedgeTicks     int     // consecutive ticks blocked in place (see wedge detection)
 	noTouchTicks   int     // consecutive ticks with no edge contact at all
-	stillTime      float64 // seconds spent continuously below RestSpeedThreshold near contact
+	stillTime      float64 // seconds spent continuously below Current.RestSpeedThreshold near contact
 }
 
 func NewBall(x, y, radius float64) *Ball {
@@ -214,7 +255,7 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 	prevVX, prevVY := b.VX, b.VY
 	startX, startY := b.X, b.Y
 
-	b.VY += Gravity * dt
+	b.VY += Current.Gravity * dt
 	b.X += b.VX * dt
 	b.Y += b.VY * dt
 
@@ -287,7 +328,7 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 		vn := b.VX*fNX + b.VY*fNY
 		vt := b.VX*fTX + b.VY*fTY
 
-		slopeGravAccel = Gravity * fTY
+		slopeGravAccel = Current.Gravity * fTY
 		slopeGravDt := slopeGravAccel * dt
 
 		// A transition only counts as "smooth rolling" if the ball was already
@@ -300,7 +341,7 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 			// Smooth rolling transition: energy-preserving redirect.
 			// Pre-gravity speed prevents rightward drift at rest (IEEE 754 Copysign-of-zero
 			// is positive, and b.VY always includes this tick's gravity injection).
-			speedPre := math.Hypot(b.VX, b.VY-Gravity*dt)
+			speedPre := math.Hypot(b.VX, b.VY-Current.Gravity*dt)
 			vtPriorGrav := vt - slopeGravDt
 			vt = math.Copysign(speedPre, vtPriorGrav) + slopeGravDt
 			vn = 0
@@ -315,15 +356,19 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 			vn = 0
 		}
 
+		rollingFriction := Current.RollingFriction
+		if e.Sand {
+			rollingFriction = Current.BunkerFriction
+		}
 		vtPrior := vt - slopeGravDt
-		decel := RollingFriction * dt
+		decel := rollingFriction * dt
 		if math.Abs(vtPrior) <= decel {
 			vtPrior = 0
 		} else {
 			vtPrior -= math.Copysign(decel, vtPrior)
 		}
 
-		if vtPrior == 0 && math.Abs(slopeGravAccel) <= StaticFriction {
+		if vtPrior == 0 && math.Abs(slopeGravAccel) <= Current.StaticFriction {
 			vt = 0
 		} else {
 			vt = vtPrior + slopeGravDt
@@ -372,19 +417,19 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 	if b.Y-b.Radius <= topY {
 		b.Y = topY + b.Radius
 		if b.VY < 0 {
-			b.VY = -b.VY * WallRestitution
+			b.VY = -b.VY * Current.WallRestitution
 		}
 	}
 	if b.X-b.Radius <= leftX {
 		b.X = leftX + b.Radius
 		if b.VX < 0 {
-			b.VX = -b.VX * WallRestitution
+			b.VX = -b.VX * Current.WallRestitution
 		}
 	}
 	if b.X+b.Radius >= rightX {
 		b.X = rightX - b.Radius
 		if b.VX > 0 {
-			b.VX = -b.VX * WallRestitution
+			b.VX = -b.VX * Current.WallRestitution
 		}
 	}
 
@@ -412,7 +457,7 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 	// it to rest. A real bounce blocks for only a tick or two before the ball
 	// moves away again, resetting the counter.
 	moved := math.Hypot(b.X-startX, b.Y-startY)
-	blocked := touchedAny && speed >= RestSpeedThreshold && moved < 0.5*speed*dt
+	blocked := touchedAny && speed >= Current.RestSpeedThreshold && moved < 0.5*speed*dt
 	// Decay rather than hard-reset: a shallow limit cycle (e.g. a V with one
 	// bouncy terrain wall feeding energy back and one low-bounce bunker wall)
 	// is blocked most ticks but occasionally slips, which a hard reset would
@@ -427,7 +472,7 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 	// Stillness timer: sustained sub-threshold speed while in (or within a
 	// couple ticks of) contact forces rest. This is the net that catches a ball
 	// wedged in a V whose velocity flips direction every tick between the two
-	// wall tangents: speed stays ~5 px/s (under RestSpeedThreshold, so the
+	// wall tangents: speed stays ~5 px/s (under Current.RestSpeedThreshold, so the
 	// blocked/wedge detector ignores it) while |Δv|/dt reads as hundreds of
 	// px/s² (so the accel check never passes). The two-tick contact grace keeps
 	// hairline touch flicker — depenetration overshoot lifting the ball 1e-4 px
@@ -438,7 +483,7 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 	} else {
 		b.noTouchTicks++
 	}
-	if speed < RestSpeedThreshold && b.noTouchTicks <= 2 {
+	if speed < Current.RestSpeedThreshold && b.noTouchTicks <= 2 {
 		b.stillTime += dt
 	} else {
 		b.stillTime = 0
@@ -450,7 +495,7 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 		b.wedgeTicks = 0
 		b.stillTime = 0
 	} else {
-		b.Resting = touchedAny && speed < RestSpeedThreshold && accel < RestAccelThreshold
+		b.Resting = touchedAny && speed < Current.RestSpeedThreshold && accel < RestAccelThreshold
 		if b.Resting {
 			b.VX, b.VY = 0, 0
 		}

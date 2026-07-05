@@ -30,7 +30,12 @@
       "Skill(fewer-permission-prompts)",
       "Skill(fewer-permission-prompts:*)",
       "Bash(npm run *)",
-      "Bash(go vet *)"
+      "Bash(go vet *)",
+      "Bash(node /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/0b262d09-5dde-4b4e-8278-c0766616e37e/scratchpad/verify_swing.mjs)",
+      "Bash(node /Users/erikinterval/dev/ts/golf01/golfclient/_verify_swing_tmp.mjs)",
+      "Bash(kill 51783)",
+      "Bash(lsof -i :8080 -sTCP:LISTEN -n -P)",
+      "Bash(npx vite *)"
     ]
   }
 }

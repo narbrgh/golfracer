@@ -1,9 +1,11 @@
 import './match.css'
+import '../gameChrome.css'
 import type { Screen } from './screenManager'
 import type { MatchHole, MatchState, MatchLeaderboard, MatchBall } from '../lobbyNet'
 import type { Hole, BuiltSegment, SplineCoeff } from '../terrain'
 import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs } from '../terrain'
 import { colorHex } from './roomLobby'
+import { GameCamera, mountGameChrome } from '../gameCamera'
 
 // The rendered canvas grows to fill the window but never shrinks below this — the
 // old fixed size, which reads well as a floor.
@@ -19,10 +21,6 @@ const BALL_LERP = 0.85
 const GRAVITY = 1500 // must match physics.Gravity on the server (for shot prediction)
 const PRED_MAX_MS = 500
 const SHOT_DELAY_MS = 2500 // matches server shotDelayTicks; water penalty is 2×
-const MIN_ZOOM = 0.35
-const MAX_ZOOM = 2.5
-const PAN_STEP = 14 // screen px/frame while an arrow key is held (in free-look)
-const MINI_W = 200, MINI_H = 52, MINI_PAD = 12 // minimap box (top-right)
 
 export interface MatchHandlers {
   onShoot: (vx: number, vy: number) => void
@@ -48,17 +46,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   let state: MatchState | null = null
   const render = new Map<number, { x: number; y: number }>()
 
-  // Canvas size (responsive), camera, and zoom.
-  let cw = MIN_W
-  let ch = MIN_H
-  let camX = 0
-  let camY = 0
-  let zoom = 1
-  let camMode: 'follow' | 'free' = 'follow'
-  const held = new Set<string>() // held arrow keys (free-look panning)
-  let panning = false
-  let panLastX = 0
-  let panLastY = 0
+  const cam = new GameCamera()
 
   let dragging = false // shot drag
   let dragX = 0
@@ -74,12 +62,9 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
 
   let canvas!: HTMLCanvasElement
   let ctx!: CanvasRenderingContext2D
-  let wrapEl!: HTMLElement
-  let hudEl!: HTMLElement
   let countdownEl!: HTMLElement
   let boardEl!: HTMLElement
-  let arrowsEl!: HTMLElement
-  let menuPanelEl!: HTMLElement
+  let chrome!: ReturnType<typeof mountGameChrome>
 
   const tY = (x: number): number => {
     if (!hole) return 0
@@ -120,87 +105,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
 
   const canShoot = (): boolean => {
     const b = myBall()
-    return camMode === 'follow' && !predActive && !!b && state?.phase === 'playing' && b.resting && !b.sunk && shotRemainingMs(b) <= 0
-  }
-
-  // World↔screen (zoom-aware). Screen origin is the canvas top-left.
-  const worldToScreen = (wx: number, wy: number) => ({ sx: (wx - camX) * zoom, sy: (wy - camY) * zoom })
-  const screenToWorld = (sx: number, sy: number) => ({ wx: camX + sx / zoom, wy: camY + sy / zoom })
-
-  function clampCam() {
-    if (!hole) return
-    const visW = cw / zoom, visH = ch / zoom
-    camX = hole.worldW <= visW ? (hole.worldW - visW) / 2 : Math.max(0, Math.min(camX, hole.worldW - visW))
-    camY = hole.worldH <= visH ? (hole.worldH - visH) / 2 : Math.max(0, Math.min(camY, hole.worldH - visH))
-  }
-
-  function resize() {
-    if (!wrapEl) return
-    const host = wrapEl.parentElement ?? wrapEl
-    cw = Math.max(MIN_W, host.clientWidth || MIN_W)
-    ch = Math.max(MIN_H, host.clientHeight || MIN_H)
-    canvas.width = cw
-    canvas.height = ch
-    canvas.style.width = cw + 'px'
-    canvas.style.height = ch + 'px'
-    wrapEl.style.width = cw + 'px'
-    wrapEl.style.height = ch + 'px'
-    clampCam()
-  }
-
-  // ---- Free-look ----
-  function enterFreeLook() {
-    if (camMode === 'free') return
-    camMode = 'free'
-    arrowsEl.style.display = ''
-    canvas.style.cursor = 'grab'
-  }
-  function exitFreeLook() {
-    if (camMode === 'follow') return
-    camMode = 'follow'
-    zoom = 1 // revert camera to the ball at normal zoom
-    held.clear()
-    panning = false
-    arrowsEl.style.display = 'none'
-    canvas.style.cursor = 'crosshair'
-  }
-  const toggleFreeLook = () => (camMode === 'free' ? exitFreeLook() : enterFreeLook())
-
-  function zoomAt(screenX: number, screenY: number, factor: number) {
-    const { wx, wy } = screenToWorld(screenX, screenY)
-    zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom * factor))
-    camX = wx - screenX / zoom
-    camY = wy - screenY / zoom
-    clampCam()
-  }
-
-  function updateCamera() {
-    if (!hole) return
-    const visW = cw / zoom, visH = ch / zoom
-    if (camMode === 'follow') {
-      const b = myBall()
-      let tx: number, ty: number
-      if (b) {
-        tx = (render.get(b.playerId)?.x ?? b.x) - visW / 2
-        ty = (render.get(b.playerId)?.y ?? b.y) - visH * 0.6
-      } else {
-        const mid = (hole.teeBackX + hole.holeX) / 2
-        tx = mid - visW / 2
-        ty = tY(mid) - visH * 0.55
-      }
-      tx = hole.worldW <= visW ? (hole.worldW - visW) / 2 : Math.max(0, Math.min(tx, hole.worldW - visW))
-      ty = hole.worldH <= visH ? (hole.worldH - visH) / 2 : Math.max(0, Math.min(ty, hole.worldH - visH))
-      camX += (tx - camX) * 0.2
-      camY += (ty - camY) * 0.2
-    } else {
-      // Free-look: held arrow keys pan the view.
-      const step = PAN_STEP / zoom
-      if (held.has('ArrowLeft')) camX -= step
-      if (held.has('ArrowRight')) camX += step
-      if (held.has('ArrowUp')) camY -= step
-      if (held.has('ArrowDown')) camY += step
-      clampCam()
-    }
+    return cam.mode === 'follow' && !predActive && !!b && state?.phase === 'playing' && b.resting && !b.sunk && shotRemainingMs(b) <= 0
   }
 
   function drawShotRing(x: number, y: number, b: MatchBall, iz: number) {
@@ -229,20 +134,20 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
 
   function draw() {
     ctx.fillStyle = '#050505'
-    ctx.fillRect(0, 0, cw, ch)
+    ctx.fillRect(0, 0, cam.cw, cam.ch)
     if (!hole) return
     const h = hole
     const th = hole.theme
-    const iz = 1 / zoom // keep certain strokes a constant screen width regardless of zoom
+    const iz = 1 / cam.zoom // keep certain strokes a constant screen width regardless of zoom
 
     ctx.save()
-    ctx.scale(zoom, zoom)
-    ctx.translate(-camX, -camY)
+    ctx.scale(cam.zoom, cam.zoom)
+    ctx.translate(-cam.camX, -cam.camY)
     ctx.beginPath()
     ctx.rect(0, 0, h.worldW, h.worldH)
     ctx.clip()
 
-    const sky = ctx.createLinearGradient(0, camY, 0, camY + ch / zoom)
+    const sky = ctx.createLinearGradient(0, cam.camY, 0, cam.camY + cam.ch / cam.zoom)
     sky.addColorStop(0, th.skyTop)
     sky.addColorStop(1, th.skyBottom)
     ctx.fillStyle = sky
@@ -321,7 +226,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     // Drag line (screen space)
     const mb = myBall()
     if (dragging && mb) {
-      const { sx, sy } = worldToScreen(render.get(mb.playerId)?.x ?? mb.x, render.get(mb.playerId)?.y ?? mb.y)
+      const { sx, sy } = cam.worldToScreen(render.get(mb.playerId)?.x ?? mb.x, render.get(mb.playerId)?.y ?? mb.y)
       const ratio = Math.min(Math.hypot(dragX - sx, dragY - sy) / MAX_DRAG, 1)
       const grad = ctx.createLinearGradient(sx, sy, dragX, dragY)
       grad.addColorStop(0, '#4af'); grad.addColorStop(1, `hsl(${240 - ratio * 240},90%,55%)`)
@@ -330,47 +235,20 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       ctx.setLineDash([])
     }
 
-    drawMinimap()
-  }
-
-  const miniX = () => cw - MINI_W - MINI_PAD
-
-  // Click/drag inside the minimap → free-look, camera jumps to that spot.
-  function miniHit(px: number, py: number): boolean {
-    const MX = miniX()
-    return px >= MX && px <= MX + MINI_W && py >= MINI_PAD && py <= MINI_PAD + MINI_H
-  }
-  function miniJump(px: number, py: number) {
-    if (!hole) return
-    const wx = ((px - miniX()) / MINI_W) * hole.worldW
-    const wy = ((py - MINI_PAD) / MINI_H) * hole.worldH
-    camX = wx - cw / zoom / 2
-    camY = wy - ch / zoom / 2
-    clampCam()
-  }
-
-  function drawMinimap() {
-    if (!hole) return
-    const MW = MINI_W, MH = MINI_H, MX = miniX(), MY = MINI_PAD
-    ctx.fillStyle = 'rgba(8,14,20,0.72)'; ctx.fillRect(MX, MY, MW, MH)
-    ctx.strokeStyle = 'rgba(246,239,206,0.3)'; ctx.lineWidth = 1; ctx.strokeRect(MX, MY, MW, MH)
-    const mx = (wx: number) => MX + (wx / hole!.worldW) * MW
-    const my = (wy: number) => MY + (wy / hole!.worldH) * MH
-    ctx.strokeStyle = 'rgba(120,190,130,0.85)'; ctx.lineWidth = 1; ctx.beginPath()
-    const stepx = hole.worldW / 60
-    for (let x = 0; x <= hole.worldW; x += stepx) { const px = mx(x), py = my(tY(x)); x === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py) }
-    ctx.stroke()
-    ctx.fillStyle = 'rgba(47,121,194,0.65)'
-    for (const p of waterPools) ctx.fillRect(mx(p.left), my(p.level), Math.max(2, mx(p.right) - mx(p.left)), 3)
-    ctx.fillStyle = '#e44'; ctx.beginPath(); ctx.arc(mx(hole.holeX), my(tY(hole.holeX)), 2, 0, Math.PI * 2); ctx.fill()
-    const visW = cw / zoom, visH = ch / zoom
-    ctx.strokeStyle = 'rgba(246,239,206,0.75)'; ctx.lineWidth = 1
-    ctx.strokeRect(mx(camX), my(camY), (visW / hole.worldW) * MW, (visH / hole.worldH) * MH)
-    if (state) for (const b of state.balls) {
-      if (b.sunk) continue
-      const rp = render.get(b.playerId) ?? { x: b.x, y: b.y }
-      ctx.fillStyle = colorHex(b.color); ctx.beginPath(); ctx.arc(mx(rp.x), my(rp.y), 2.5, 0, Math.PI * 2); ctx.fill()
-    }
+    cam.drawMinimapFrame(ctx, (mwx, mwy) => {
+      ctx.strokeStyle = 'rgba(120,190,130,0.85)'; ctx.lineWidth = 1; ctx.beginPath()
+      const stepx = h.worldW / 60
+      for (let x = 0; x <= h.worldW; x += stepx) { const px = mwx(x), py = mwy(tY(x)); x === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py) }
+      ctx.stroke()
+      ctx.fillStyle = 'rgba(47,121,194,0.65)'
+      for (const p of waterPools) ctx.fillRect(mwx(p.left), mwy(p.level), Math.max(2, mwx(p.right) - mwx(p.left)), 3)
+      ctx.fillStyle = '#e44'; ctx.beginPath(); ctx.arc(mwx(h.holeX), mwy(tY(h.holeX)), 2, 0, Math.PI * 2); ctx.fill()
+      if (state) for (const b of state.balls) {
+        if (b.sunk) continue
+        const rp = render.get(b.playerId) ?? { x: b.x, y: b.y }
+        ctx.fillStyle = colorHex(b.color); ctx.beginPath(); ctx.arc(mwx(rp.x), mwy(rp.y), 2.5, 0, Math.PI * 2); ctx.fill()
+      }
+    })
   }
 
   function tick() {
@@ -396,19 +274,24 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       if ((mb && !mb.resting) || now - predStart > PRED_MAX_MS || state?.phase !== 'playing') predActive = false
     }
 
-    updateCamera()
+    if (hole) {
+      const b = myBall()
+      const target = b
+        ? { x: render.get(b.playerId)?.x ?? b.x, y: render.get(b.playerId)?.y ?? b.y }
+        : { x: (hole.teeBackX + hole.holeX) / 2, y: tY((hole.teeBackX + hole.holeX) / 2) }
+      cam.update(target)
+    }
     draw()
     updateHud()
   }
 
   function updateHud() {
-    if (!state) { hudEl.textContent = ''; countdownEl.style.display = 'none'; return }
+    if (!state) { chrome.setHud(null); countdownEl.style.display = 'none'; return }
     if (state.phase === 'playing') {
       const ms = clockBaseMs + (performance.now() - clockAt)
-      hudEl.textContent = `Hole ${state.holeIndex + 1}/${state.holeCount}    ⏱ ${(ms / 1000).toFixed(1)}s`
-      hudEl.style.display = ''
+      chrome.setHud(`Hole ${state.holeIndex + 1}/${state.holeCount}    ⏱ ${(ms / 1000).toFixed(1)}s`)
     } else {
-      hudEl.style.display = 'none'
+      chrome.setHud(null)
     }
     if (state.phase === 'countdown') {
       countdownEl.style.display = ''
@@ -424,113 +307,66 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   }
 
   // ---- keyboard (attached while the screen is active) ----
+  // Escape toggles the hamburger menu; Enter/M/arrows/Space are handled by
+  // cam.onKeyDown (see gameCamera.ts) — same bindings as single-player.
   const onKeyDown = (e: KeyboardEvent) => {
     const t = e.target
     if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return
-    if (e.key === ' ') { e.preventDefault(); toggleFreeLook(); return }
-    if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-      e.preventDefault()
-      if (camMode === 'follow') enterFreeLook()
-      held.add(e.key)
-    }
+    if (e.key === 'Escape') { e.preventDefault(); chrome.toggleMenu(); return }
+    if (cam.onKeyDown(e)) { e.preventDefault(); chrome.sync() }
   }
-  const onKeyUp = (e: KeyboardEvent) => { held.delete(e.key) }
+  const onKeyUp = (e: KeyboardEvent) => { cam.onKeyUp(e) }
 
   return {
     id: 'match',
     mount() {
       const root = document.createElement('div')
       root.className = 'screen match-screen'
-      root.innerHTML = `
-        <div class="match-wrap">
-          <canvas class="match-canvas"></canvas>
-          <div class="match-hud" data-hud></div>
-          <div class="match-countdown" data-countdown style="display:none"></div>
-          <div class="free-arrows" data-arrows style="display:none">
-            <div class="free-hint">Free look — Space or right-click to exit</div>
-            <button class="free-arrow fa-up" data-pan="up">▲</button>
-            <button class="free-arrow fa-down" data-pan="down">▼</button>
-            <button class="free-arrow fa-left" data-pan="left">◀</button>
-            <button class="free-arrow fa-right" data-pan="right">▶</button>
-          </div>
-          <div class="match-menu">
-            <button class="match-menu-toggle" data-menu-toggle aria-label="Menu">☰</button>
-            <div class="match-menu-panel" data-menu-panel style="display:none">
-              <button class="mm-item" data-leave>Leave Game</button>
-              <button class="mm-item" data-close>Close Menu</button>
-            </div>
-          </div>
-          <div class="match-board" data-board style="display:none"></div>
-        </div>`
-      wrapEl = root.querySelector('.match-wrap')!
-      canvas = root.querySelector('canvas')!
-      ctx = canvas.getContext('2d')!
-      hudEl = root.querySelector('[data-hud]')!
-      countdownEl = root.querySelector('[data-countdown]')!
-      boardEl = root.querySelector('[data-board]')!
-      arrowsEl = root.querySelector('[data-arrows]')!
-      menuPanelEl = root.querySelector('[data-menu-panel]')!
 
-      resize()
-      new ResizeObserver(() => resize()).observe(root)
-
-      // Hamburger menu
-      root.querySelector('[data-menu-toggle]')!.addEventListener('click', () => {
-        menuPanelEl.style.display = menuPanelEl.style.display === 'none' ? '' : 'none'
+      chrome = mountGameChrome(root, cam, {
+        minW: MIN_W,
+        minH: MIN_H,
+        menuItems: [
+          { label: 'Leave Game', onClick: () => handlers.onLeave() },
+        ],
       })
-      root.querySelector('[data-close]')!.addEventListener('click', () => { menuPanelEl.style.display = 'none' })
-      root.querySelector('[data-leave]')!.addEventListener('click', () => { menuPanelEl.style.display = 'none'; handlers.onLeave() })
+      canvas = chrome.canvas
+      ctx = chrome.ctx
 
-      // Free-look arrow buttons nudge the camera.
-      const nudge = (dir: string) => {
-        const s = 90 / zoom
-        if (dir === 'up') camY -= s
-        else if (dir === 'down') camY += s
-        else if (dir === 'left') camX -= s
-        else if (dir === 'right') camX += s
-        clampCam()
-      }
-      for (const btn of Array.from(arrowsEl.querySelectorAll<HTMLButtonElement>('[data-pan]'))) {
-        btn.addEventListener('click', () => nudge(btn.dataset.pan!))
-      }
+      countdownEl = document.createElement('div')
+      countdownEl.className = 'match-countdown'
+      countdownEl.style.display = 'none'
+      chrome.root.appendChild(countdownEl)
 
-      // Right-click toggles free-look (and never shows the context menu).
-      canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); toggleFreeLook() })
-
-      // Wheel zooms while in free-look.
-      canvas.addEventListener('wheel', (e) => {
-        if (camMode !== 'free') return
-        e.preventDefault()
-        const p = screenPos(e)
-        zoomAt(p.x, p.y, e.deltaY < 0 ? 1.1 : 1 / 1.1)
-      }, { passive: false })
+      boardEl = document.createElement('div')
+      boardEl.className = 'match-board'
+      boardEl.style.display = 'none'
+      chrome.root.appendChild(boardEl)
 
       canvas.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return
         const p = screenPos(e)
         // Minimap: enter free-look and scrub the camera by clicking/dragging on it.
-        if (miniHit(p.x, p.y)) {
-          enterFreeLook()
-          miniJump(p.x, p.y)
-          const onMove = (ev: MouseEvent) => { const q = screenPos(ev); miniJump(q.x, q.y) }
+        if (cam.miniHit(p.x, p.y)) {
+          cam.enterFreeLook()
+          chrome.sync()
+          cam.miniJump(p.x, p.y)
+          const onMove = (ev: MouseEvent) => { const q = screenPos(ev); cam.miniJump(q.x, q.y) }
           const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
           window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
           return
         }
-        if (camMode === 'free') {
+        if (cam.mode === 'free') {
           // Left-drag pans the view.
-          panning = true; panLastX = p.x; panLastY = p.y
+          let panLastX = p.x, panLastY = p.y
           canvas.style.cursor = 'grabbing'
           const onMove = (ev: MouseEvent) => {
-            if (!panning) return
             const q = screenPos(ev)
-            camX -= (q.x - panLastX) / zoom
-            camY -= (q.y - panLastY) / zoom
+            cam.panBy(q.x - panLastX, q.y - panLastY)
             panLastX = q.x; panLastY = q.y
-            clampCam()
           }
           const onUp = () => {
-            panning = false; canvas.style.cursor = 'grab'
+            canvas.style.cursor = 'grab'
             window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
           }
           window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
@@ -539,7 +375,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         // Shoot mode
         if (!canShoot()) return
         const mb = myBall()!
-        const { sx, sy } = worldToScreen(render.get(mb.playerId)?.x ?? mb.x, render.get(mb.playerId)?.y ?? mb.y)
+        const { sx, sy } = cam.worldToScreen(render.get(mb.playerId)?.x ?? mb.x, render.get(mb.playerId)?.y ?? mb.y)
         if (Math.hypot(p.x - sx, p.y - sy) > BALL_R + 10) return
         dragging = true
         const clamp = (mx: number, my: number) => {
@@ -566,7 +402,6 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         window.addEventListener('mouseup', onUp)
       })
 
-      canvas.style.cursor = 'crosshair'
       requestAnimationFrame(tick)
       return root
     },
@@ -577,8 +412,9 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     onExit() {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
-      exitFreeLook()
-      menuPanelEl.style.display = 'none'
+      cam.exitFreeLook()
+      chrome.sync()
+      chrome.closeMenu()
       render.clear()
       hole = null
       state = null
@@ -590,9 +426,8 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       hole = m.hole
       render.clear()
       rebuildCaches()
-      const visW = cw / zoom, visH = ch / zoom
-      camX = Math.max(0, Math.min(hole.teeBackX - visW / 2, Math.max(0, hole.worldW - visW)))
-      camY = Math.max(0, Math.min(tY(hole.teeBackX) - visH * 0.55, Math.max(0, hole.worldH - visH)))
+      cam.setWorld(hole.worldW, hole.worldH)
+      cam.centerOn(hole.teeBackX, tY(hole.teeBackX))
     },
     setState(m) {
       state = m

@@ -42,24 +42,12 @@ body {
   min-height: 100vh;
 }
 
-/* Corner button that drops back to the main menu from the game screen. */
-.back-to-menu {
-  position: fixed;
-  top: 12px;
-  left: 12px;
-  z-index: 40;
-  padding: 7px 13px;
-  border: 1px solid rgba(246, 239, 206, 0.35);
-  border-radius: 7px;
-  background: rgba(12, 20, 28, 0.82);
-  color: var(--cream);
-  font: 13px/1 monospace;
-  cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-.back-to-menu:hover {
-  background: rgba(30, 46, 62, 0.95);
-  border-color: rgba(246, 239, 206, 0.7);
+/* Single-player/editor screen — same dark backdrop as the match screen
+   (navigation back to the main menu lives in the hamburger menu instead of a
+   standalone corner button; see gameCamera.ts's mountGameChrome). */
+.game-screen {
+  overflow: hidden;
+  background: #050505;
 }
 
 /* "Coming soon" placeholder (Online). */

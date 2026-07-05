@@ -20,7 +20,7 @@ import (
 
 const (
 	tickRate   = time.Second / 60
-	listenAddr = ":8080"
+	listenAddr = ":8081"
 
 	// Hole geometry — width and depth are fixed; X comes from the course.
 	holeW = 30.0
@@ -90,6 +90,7 @@ type clientMsg struct {
 	VY   float64         `json:"vy"`
 	Tee  string          `json:"tee"`
 	Hole int             `json:"hole"` // active hole index for "course"/"selectHole"
+	Club string          `json:"club"` // driver | wedge | putter — which club fired this "shoot"
 	Data json.RawMessage `json:"data"`
 }
 
@@ -262,7 +263,7 @@ func main() {
 			y, sand := surfaceAt(x)
 			if !inGap(prevX) && !inGap(x) {
 				if prevSand || sand {
-					edges = append(edges, physics.NewEdgeMat(prevX, prevY, x, y, bunkerRestitution, bunkerBounceFric))
+					edges = append(edges, physics.NewSandEdge(prevX, prevY, x, y, bunkerRestitution, bunkerBounceFric))
 				} else {
 					edges = append(edges, physics.NewEdge(prevX, prevY, x, y))
 				}
@@ -303,7 +304,6 @@ func main() {
 	type builtBunker struct {
 		coeffs        []terrain.SplineCoeff
 		leftX, rightX float64
-		b             terrain.Bunker
 	}
 	var builtBunkers []builtBunker
 	rebuildBunkers := func() {
@@ -322,7 +322,7 @@ func main() {
 					rightX = p.X
 				}
 			}
-			builtBunkers = append(builtBunkers, builtBunker{coeffs, leftX, rightX, b})
+			builtBunkers = append(builtBunkers, builtBunker{coeffs, leftX, rightX})
 		}
 	}
 	rebuildBunkers()
@@ -341,10 +341,9 @@ func main() {
 	penaltyY := 0.0
 	lastNonWaterX := hole.TeeBackX
 
-	// Bunker state: depth is captured as ball.VY at first entry (downward component).
+	// Bunker state: whether the ball is currently sitting in a bunker, checked
+	// each substep — governs the club penalty applied on the next "shoot".
 	inBunker := false
-	bunkerDepth := 0.0 // 0 = shallow, 1 = deep
-	activeBunker := builtBunker{}
 
 	// Soft-lock diagnostics: if the ball stays not-resting but confined to a
 	// small region (frozen OR bouncing in place) for a sustained window, dump
@@ -354,7 +353,7 @@ func main() {
 	slWinTicks := 0
 	slDumped := false
 
-	ballInBunker := func() (bool, builtBunker) {
+	ballInBunker := func() bool {
 		for _, bb := range builtBunkers {
 			if ball.X < bb.leftX || ball.X > bb.rightX {
 				continue
@@ -364,10 +363,10 @@ func main() {
 			// In screen coords Y increases downward, so "rim above terrain"
 			// means topY < groundY (smaller Y = higher on screen).
 			if topY < groundY {
-				return true, bb
+				return true
 			}
 		}
-		return false, builtBunker{}
+		return false
 	}
 
 	// setActive switches the played/previewed hole. It swaps in the new course +
@@ -389,7 +388,7 @@ func main() {
 		rebuildBunkers() // must run before rebuildEdges so rim edges use current data
 		rebuildEdges()
 		inHoleTicks, sinkTicks, inWaterTicks, penaltyFrozen = 0, 0, 0, false
-		inBunker, bunkerDepth = false, 0
+		inBunker = false
 		ball = physics.NewBall(hole.TeeBackX, startY(), 10)
 		lastNonWaterX = hole.TeeBackX
 	}
@@ -483,24 +482,11 @@ func main() {
 					ball.Tick(subDt, nearby, 0, hole.WorldW, 0)
 
 					// Bunker: the rim is now a real physics surface (edges added in
-					// rebuildEdges), so the ball naturally bounces/rests on it
-					// via ball.Tick. We only need to detect the first contact to
-					// capture depth (entry speed), then track inBunker for the
-					// shot-velocity multiplier.
-					nowIn, bb := ballInBunker()
-					if nowIn && !inBunker {
-						speed := math.Hypot(ball.VX, ball.VY)
-						thresh := bb.b.DeepThreshold
-						if thresh <= 0 {
-							thresh = 300
-						}
-						bunkerDepth = math.Min(speed/thresh, 1.0)
-						activeBunker = bb
-						inBunker = true
-					}
-					if !nowIn {
-						inBunker = false
-					}
+					// rebuildEdges), so the ball naturally bounces/rests on it via
+					// ball.Tick. We only need to track whether the ball currently
+					// sits in a bunker, which the "shoot" handler reads to decide
+					// whether to apply the current club's bunker penalty.
+					inBunker = ballInBunker()
 
 					if !inAnyWater(ball.X) {
 						lastNonWaterX = ball.X
@@ -637,15 +623,17 @@ func main() {
 					penaltyFrozen = false
 					vx, vy := msg.VX, msg.VY
 					if inBunker {
-						b := activeBunker.b
-						shallow, deep := b.ShallowMult, b.DeepMult
-						if shallow == 0 {
-							shallow = 0.75
+						var mult float64
+						switch msg.Club {
+						case "driver":
+							mult = physics.Current.DriverPenalty
+						case "wedge":
+							mult = physics.Current.WedgePenalty
+						case "putter":
+							mult = physics.Current.PutterPenalty
+						default:
+							mult = 1
 						}
-						if deep == 0 {
-							deep = 0.25
-						}
-						mult := shallow + (deep-shallow)*bunkerDepth
 						vx *= mult
 						vy *= mult
 					}
@@ -685,7 +673,7 @@ func main() {
 				sinkTicks = 0
 				inWaterTicks = 0
 				penaltyFrozen = false
-				inBunker, bunkerDepth = false, 0
+				inBunker = false
 				teeX := hole.TeeBackX
 				if msg.Tee == "forward" {
 					teeX = hole.TeeForwardX
@@ -791,6 +779,40 @@ func main() {
 			}
 			log.Printf("course saved: id=%q holes=%d", id, len(saved.Holes))
 			writeJSON(w, saved)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// ---- Physics config API (the "Ken" debug menu) ----
+	// GET returns the live tunables plus the hardcoded defaults, so the client
+	// can show "default: X" next to each editable field. POST applies a full
+	// replacement set immediately — session-only, nothing is written to disk.
+	http.HandleFunc("/physics/config", func(w http.ResponseWriter, r *http.Request) {
+		cors(w)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			ballMu.Lock()
+			cur := physics.Current
+			ballMu.Unlock()
+			writeJSON(w, map[string]any{
+				"current":  cur,
+				"defaults": physics.DefaultTunables(),
+			})
+		case http.MethodPost:
+			var t physics.Tunables
+			if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+				http.Error(w, "bad tunables json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			ballMu.Lock()
+			physics.Current = t
+			ballMu.Unlock()
+			log.Printf("physics config updated: %+v", t)
+			writeJSON(w, t)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}

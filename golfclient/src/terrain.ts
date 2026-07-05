@@ -141,10 +141,6 @@ export type HazardKind = 'water' | 'sand' | 'tree'  // 'sand'/'tree' are legacy;
 
 export interface Bunker {
   topEdge: Pt[]           // Catmull-Rom control points for the rim (sorted by x)
-  friction: number        // rolling-friction multiplier while in bunker (default 4)
-  shallowMult: number     // shot-velocity multiplier at depth 0 (default 0.75)
-  deepMult: number        // shot-velocity multiplier at depth 1 (default 0.25)
-  deepThreshold: number   // downward px/s at entry that maps to depth=1 (default 300)
 }
 
 // ---- Platforms ----

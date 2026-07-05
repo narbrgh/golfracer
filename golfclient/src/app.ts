@@ -5,6 +5,7 @@ import { createOnlineMenu } from './screens/online'
 import { createRoomsBrowser } from './screens/roomsBrowser'
 import { createRoomLobby } from './screens/roomLobby'
 import { createMatchScreen } from './screens/matchScreen'
+import { createKenScreen } from './screens/kenScreen'
 import { mountGame } from './main'
 import { listRooms } from './roomsapi'
 import { listCourses } from './courseapi'
@@ -20,30 +21,32 @@ screens.register(
     onSinglePlayer: () => screens.show('game', { openEditor: false }),
     onOnline: () => screens.show('online'),
     onEditor: () => screens.show('game', { openEditor: true }),
+    onKen: () => screens.show('ken'),
   }),
 )
+
+screens.register(createKenScreen({ onBack: () => screens.show('mainMenu') }))
 
 // --- Game screen (Single Player / Map Editor) ---
 // Mounts the existing single-player game once; later entries just toggle it back
 // into view (its WebSocket + render loop keep running). `openEditor` opens the
-// map-editor overlay — that's the Map Editor menu item.
-let game: { openEditor: () => void } | null = null
+// map-editor overlay — that's the Map Editor menu item. Navigation back to the
+// main menu is now a hamburger-menu item (shared gameCamera.ts chrome), not a
+// standalone corner button — that button would overlap the hole/timer HUD.
+let game: { openEditor: () => void; onEnter: () => void; onExit: () => void } | null = null
 screens.register({
   id: 'game',
   mount() {
     const root = document.createElement('div')
     root.className = 'screen game-screen'
-    const back = document.createElement('button')
-    back.className = 'back-to-menu'
-    back.textContent = '← Menu'
-    back.addEventListener('click', () => screens.show('mainMenu'))
-    root.appendChild(back)
-    game = mountGame(root)
+    game = mountGame(root, { onBack: () => screens.show('mainMenu') })
     return root
   },
   onEnter(params) {
     if ((params as { openEditor?: boolean } | undefined)?.openEditor) game?.openEditor()
+    game?.onEnter()
   },
+  onExit() { game?.onExit() },
 })
 
 // --- Online flow: lobby WebSocket drives create/join and all in-room actions ---

@@ -2,28 +2,26 @@ import { buildSegments, terrainY, hexWithAlpha, buildSpline, splineY, waterPoolB
 import type { Course, Hole, BuiltSegment, SplineCoeff, Platform } from './terrain'
 import { initEditor } from './editor'
 import { listCourses, getCourse, newCourse } from './courseapi'
+import { SwingEngine, formatDistance } from './swing'
+import { GameCamera, mountGameChrome } from './gameCamera'
+import './gameChrome.css'
 
 // mountGame builds and runs the single-player game inside `host`. This whole body
 // used to run at module load; it's wrapped in a function so the screen manager can
 // mount it on demand (Single Player / Map Editor) instead of on page load — which
 // also means the WebSocket only connects once the game is actually entered.
-// Returns a small handle so callers can open the map-editor overlay.
-export function mountGame(host: HTMLElement, opts: { openEditor?: boolean } = {}): { openEditor: () => void } {
+// Returns a small handle so callers can open the map-editor overlay and (scoped to
+// when this screen is actually active) attach/detach the camera's keyboard listeners.
+export function mountGame(host: HTMLElement, opts: { openEditor?: boolean; onBack?: () => void } = {}): { openEditor: () => void; onEnter: () => void; onExit: () => void } {
 
 // ---- Canvas / render constants ----
-// Canvas grows with the window but never below this floor (see resizeCanvas).
-const MIN_CANVAS_W = 800
-const MIN_CANVAS_H = 540
-let CANVAS_W = MIN_CANVAS_W
-let CANVAS_H = MIN_CANVAS_H
+// Canvas grows with the window but never below this floor (see mountGameChrome).
+const MIN_W = 900
+const MIN_H = 560
 const BALL_RADIUS = 10
 const HOLE_W = BALL_RADIUS * 3   // fixed width — 1.5× ball diameter
 const HOLE_D = 40                 // fixed pit depth
-const POWER_SCALE = 10
-const MAX_DRAG = 150
 const TEE_H = 10                  // tee platform height (fixed)
-const MIN_ZOOM      = 0.15
-const FOLLOW_CAM_LERP = 0.5
 const BALL_LERP       = 0.85
 const REST_DEBOUNCE_MS = 250
 const SHOT_DELAY_MS    = 2500
@@ -125,6 +123,9 @@ function updateHole(h: Hole) {
   splineCoeffs = buildSpline(h.controlPoints)
   rebuildWaterPools()
   rebuildBunkerPools()
+  cam.setWorld(h.worldW, h.worldH)
+  cam.centerOn(h.teeBackX, tY(h.teeBackX))
+  holeStartMs = Date.now()
 }
 
 // sendActiveCourse pushes the whole course + active hole index to the server for
@@ -137,61 +138,19 @@ function sendActiveCourse() {
 }
 
 // ---- DOM setup ----
-host.style.cssText = 'background:#050505;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding-top:10px;position:relative'
-
-const wrap = document.createElement('div')
-wrap.style.cssText = 'position:relative;display:inline-block'
-host.appendChild(wrap)
-
-const canvas = document.createElement('canvas')
-canvas.width = CANVAS_W
-canvas.height = CANVAS_H
-canvas.style.cssText = 'border:1px solid #222;cursor:crosshair;display:block'
-wrap.appendChild(canvas)
-const ctx = canvas.getContext('2d')!
-
-const editorBtn = document.createElement('button')
-editorBtn.textContent = 'Map Editor'
-editorBtn.style.cssText = [
-  'position:absolute;top:8px;right:8px',
-  'background:rgba(20,20,20,0.85);border:1px solid #444',
-  'color:#aaa;font:12px monospace;padding:4px 10px',
-  'border-radius:3px;cursor:pointer;z-index:10',
-  'transition:background 0.15s,color 0.15s',
-].join(';')
-editorBtn.addEventListener('mouseenter', () => { editorBtn.style.background='rgba(40,40,40,0.95)'; editorBtn.style.color='#fff' })
-editorBtn.addEventListener('mouseleave', () => { editorBtn.style.background='rgba(20,20,20,0.85)'; editorBtn.style.color='#aaa' })
-wrap.appendChild(editorBtn)
-
-const sliderRowEl = document.createElement('div')
-sliderRowEl.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:8px'
-const zoomSlider = document.createElement('input')
-zoomSlider.type = 'range'
-zoomSlider.min = String(MIN_ZOOM.toFixed(2)); zoomSlider.max = '2'; zoomSlider.step = '0.05'; zoomSlider.value = '1'
-zoomSlider.style.width = '180px'
-const zoomLabel = document.createElement('span')
-zoomLabel.style.cssText = 'color:#888;font:13px monospace;width:60px'
-zoomLabel.textContent = '1.00×'
-zoomSlider.addEventListener('input', () => {
-  zoom = parseFloat(zoomSlider.value)
-  zoomLabel.textContent = zoom.toFixed(2) + '×'
+// GameCamera + mountGameChrome (gameCamera.ts) are shared with matchScreen.ts —
+// same Hit/Free-look camera, minimap, hole/timer HUD, and hamburger menu chrome.
+const cam = new GameCamera()
+const chrome = mountGameChrome(host, cam, {
+  minW: MIN_W,
+  minH: MIN_H,
+  menuItems: [
+    { label: 'Map Editor', onClick: () => editor.show() },
+    { label: 'Back to Menu', onClick: () => opts.onBack?.() },
+  ],
 })
-const zoomText = document.createElement('span')
-zoomText.style.cssText = 'color:#666;font:13px monospace'
-zoomText.textContent = 'zoom'
-sliderRowEl.append(zoomText, zoomSlider, zoomLabel)
-host.appendChild(sliderRowEl)
-
-// Grow the canvas to fill the window (min MIN_CANVAS_W×H), leaving room for the
-// zoom-slider row. CANVAS_W/H are read fresh every frame, so the renderer adapts.
-function resizeCanvas() {
-  CANVAS_W = Math.max(MIN_CANVAS_W, Math.floor(window.innerWidth - 8))
-  CANVAS_H = Math.max(MIN_CANVAS_H, Math.floor(window.innerHeight - sliderRowEl.offsetHeight - 34))
-  canvas.width = CANVAS_W
-  canvas.height = CANVAS_H
-}
-resizeCanvas()
-window.addEventListener('resize', resizeCanvas)
+const canvas = chrome.canvas
+const ctx = chrome.ctx
 
 // ---- Cutouts ----
 // Only the hole gaps the terrain (it's a real pit the ball drops through). Water
@@ -280,31 +239,48 @@ let physBallX = hole.teeBackX
 let physBallY = tY(hole.teeBackX) - TEE_H - BALL_RADIUS
 let ballX = physBallX, ballY = physBallY
 let prevResting = true
-let cameraMode: 'follow' | 'free' = 'free'
 let restingDebounceStart: number | null = null
 let trulyResting = true, shotAllowedAt = 0
 let showingHole = false
 let inWaterPenalty = false, inWaterSinking = false, waterSinkStartMs = 0
+let holeStartMs = Date.now() // for the hole/timer HUD readout — visual parity only, not scored
 
-function canShootNow() { return trulyResting && Date.now() >= shotAllowedAt }
+// The ball is settled and past its post-shot cooldown — the parabola preview
+// shows whenever this is true, even in free-look (so you can survey a shot
+// from a wider view before committing).
+function canPreviewShot() { return trulyResting && Date.now() >= shotAllowedAt }
+// Actually aiming/shooting additionally requires Hit (follow) mode — matches
+// matchScreen's canShoot().
+function canShootNow() { return cam.mode === 'follow' && canPreviewShot() }
 
-let camX = Math.max(0, Math.min(ballX - CANVAS_W / 2, hole.worldW - CANVAS_W))
-let camY = Math.max(0, Math.min(ballY - CANVAS_H * 0.65, hole.worldH - CANVAS_H))
-let zoom = 1.0, dragging = false, dragX = 0, dragY = 0
+// Aim-drag visualization — screen-space line from the click's start point to
+// the current cursor, shown only while the mouse is held down. If the cursor
+// stays within AIM_DEADZONE_R screen px of the start point, the drag is a
+// "dead zone": the angle doesn't change (drag line/parabola read as
+// not-yet-committed), letting the user cancel by releasing back near where
+// they pressed. A circle of that same radius is drawn at the origin point —
+// red while inside the dead zone, light blue once dragged past it. Both the
+// threshold and the circle are fixed screen-space sizes (no zoom scaling):
+// this is about cursor travel on screen, not world distance.
+let aiming = false, aimEngaged = false
+let aimStartSx = 0, aimStartSy = 0, aimCurSx = 0, aimCurSy = 0
+const AIM_DRAG_COLOR = 'rgba(120,200,255,0.9)'
+const AIM_DEADZONE_R = BALL_RADIUS * 4
 
-function worldToScreen(wx: number, wy: number) {
-  return { sx: (wx - camX) * zoom, sy: (wy - camY) * zoom }
+const swing = new SwingEngine({ ballColorHex: '#fff' })
+
+function launch(vx: number, vy: number) {
+  ws.send(JSON.stringify({ type: 'shoot', vx, vy, club: swing.club }))
 }
-function powerColor(ratio: number) { return `hsl(${240 - ratio * 240}, 90%, 55%)` }
 
 function drawSunAndMountains() {
   const th = hole.theme
-  const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
+  const visW = cam.cw / cam.zoom, visH = cam.ch / cam.zoom
 
   // Sun — position formula maps to a fixed screen position (upper-right) at any cam/zoom.
   // ss uses /zoom so the screen-space radius stays constant regardless of zoom level.
-  const sunX = camX + visW * 0.80, sunY = camY + visH * 0.17
-  const ss = th.sunSize / zoom
+  const sunX = cam.camX + visW * 0.80, sunY = cam.camY + visH * 0.17
+  const ss = th.sunSize / cam.zoom
 
   // Draw back to front: ring2 circle, ring1 circle, core — each smaller circle covers the center.
   ctx.beginPath(); ctx.arc(sunX, sunY, ss * 2, 0, Math.PI * 2)
@@ -332,9 +308,9 @@ function drawSunAndMountains() {
 
   // Back mountains — p=0.06: moves at 6% of terrain speed (very far)
   const p1 = 0.06
-  const m1Shift = camX * (1 - p1)
-  const m1EffStart = camX * p1 - 20
-  const m1EffEnd   = camX * p1 + visW + 20
+  const m1Shift = cam.camX * (1 - p1)
+  const m1EffStart = cam.camX * p1 - 20
+  const m1EffEnd   = cam.camX * p1 + visW + 20
   const baseY1 = th.mountain1Y * hole.worldH
   ctx.fillStyle = th.mountain1
   ctx.beginPath()
@@ -351,9 +327,9 @@ function drawSunAndMountains() {
 
   // Front mountains — p=0.22: moves at 22% of terrain speed (mid distance)
   const p2 = 0.22
-  const m2Shift = camX * (1 - p2)
-  const m2EffStart = camX * p2 - 20
-  const m2EffEnd   = camX * p2 + visW + 20
+  const m2Shift = cam.camX * (1 - p2)
+  const m2EffStart = cam.camX * p2 - 20
+  const m2EffEnd   = cam.camX * p2 + visW + 20
   const baseY2 = th.mountain2Y * hole.worldH
   ctx.fillStyle = th.mountain2
   ctx.beginPath()
@@ -370,17 +346,9 @@ function drawSunAndMountains() {
 }
 
 // ---- Minimap ----
-const MINI_X = 8, MINI_Y = 8, MINI_W = 200, MINI_H = 50
-
-function drawMinimap() {
-  ctx.fillStyle = 'rgba(0,0,0,0.65)'
-  ctx.fillRect(MINI_X, MINI_Y, MINI_W, MINI_H)
-  ctx.strokeStyle = '#444'; ctx.lineWidth = 1
-  ctx.strokeRect(MINI_X, MINI_Y, MINI_W, MINI_H)
-
-  const mwx = (wx: number) => MINI_X + (wx / hole.worldW) * MINI_W
-  const mwy = (wy: number) => MINI_Y + (wy / hole.worldH) * MINI_H
-
+// Shared frame (bg/border/camera-viewport rect) is drawn by cam.drawMinimapFrame;
+// this only renders the single-player-specific content inside it.
+function drawMinimapContent(mwx: (wx: number) => number, mwy: (wy: number) => number, parabolaPts: { x: number; y: number }[] | null, parabolaColor: string) {
   ctx.strokeStyle = '#556644'; ctx.lineWidth = 1; ctx.beginPath()
   for (let wx = 0; wx <= hole.worldW; wx += 60) {
     wx === 0 ? ctx.moveTo(mwx(wx), mwy(tY(wx))) : ctx.lineTo(mwx(wx), mwy(tY(wx)))
@@ -395,28 +363,31 @@ function drawMinimap() {
     ctx.roundRect(mx, my, mw, mh, 1); ctx.fill()
   }
 
-  const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
-  const rectX = mwx(camX), rectY = mwy(camY)
-  const rectW = (visW / hole.worldW) * MINI_W, rectH = (visH / hole.worldH) * MINI_H
-  ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.fillRect(rectX, rectY, rectW, rectH)
-  ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1
-  ctx.strokeRect(rectX, rectY, rectW, rectH)
-
   ctx.fillStyle = '#e44'; ctx.beginPath()
   ctx.arc(mwx(hole.holeX), mwy(tY(hole.holeX)), 3, 0, Math.PI * 2); ctx.fill()
   ctx.fillStyle = '#fff'; ctx.beginPath()
   ctx.arc(mwx(ballX), mwy(ballY), 3, 0, Math.PI * 2); ctx.fill()
+
+  if (parabolaPts && parabolaPts.length > 1) {
+    ctx.strokeStyle = parabolaColor; ctx.lineWidth = 1
+    ctx.setLineDash([2, 2])
+    ctx.beginPath()
+    ctx.moveTo(mwx(parabolaPts[0].x), mwy(parabolaPts[0].y))
+    for (let i = 1; i < parabolaPts.length; i++) ctx.lineTo(mwx(parabolaPts[i].x), mwy(parabolaPts[i].y))
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
 }
 
 // ---- Draw ----
 function draw() {
   // Void outside world bounds
   ctx.fillStyle = '#050505'
-  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+  ctx.fillRect(0, 0, cam.cw, cam.ch)
 
   ctx.save()
-  ctx.scale(zoom, zoom)
-  ctx.translate(-camX, -camY)
+  ctx.scale(cam.zoom, cam.zoom)
+  ctx.translate(-cam.camX, -cam.camY)
 
   // Clip everything to the world rectangle — nothing renders outside world bounds
   ctx.beginPath()
@@ -424,7 +395,7 @@ function draw() {
   ctx.clip()
 
   // Sky — gradient spans the visible viewport so it stays screen-fixed regardless of pan/zoom.
-  const sky = ctx.createLinearGradient(0, camY, 0, camY + CANVAS_H / zoom)
+  const sky = ctx.createLinearGradient(0, cam.camY, 0, cam.camY + cam.ch / cam.zoom)
   sky.addColorStop(0, hole.theme.skyTop); sky.addColorStop(1, hole.theme.skyBottom)
   ctx.fillStyle = sky
   ctx.fillRect(0, 0, hole.worldW, hole.worldH)
@@ -462,7 +433,7 @@ function draw() {
   ctx.strokeStyle = hole.theme.groundLine; ctx.lineWidth = hole.theme.groundLineW; ctx.stroke()
 
   // World boundary — box only, not tic-tac-toe
-  ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 6 / zoom
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 6 / cam.zoom
   ctx.strokeRect(0, 0, hole.worldW, hole.worldH)
 
   ctx.fillStyle = '#ffffff'
@@ -491,7 +462,7 @@ function draw() {
       const rem = Math.max(0, shotAllowedAt - Date.now())
       const outerRatio = Math.max(0, (rem - SHOT_DELAY_MS) / SHOT_DELAY_MS)
       const innerRatio = Math.min(1, rem / SHOT_DELAY_MS)
-      const lw = 3 / zoom
+      const lw = 3 / cam.zoom
       for (const { r, ratio } of [{ r: BALL_RADIUS + 16, ratio: outerRatio }, { r: BALL_RADIUS + 8, ratio: innerRatio }]) {
         if (ratio === 0) continue
         const elapsed = 1 - ratio
@@ -503,7 +474,7 @@ function draw() {
       }
     } else {
       const ratio = (shotAllowedAt - Date.now()) / SHOT_DELAY_MS
-      const arcR = BALL_RADIUS + 8, lw = 3 / zoom
+      const arcR = BALL_RADIUS + 8, lw = 3 / cam.zoom
       ctx.strokeStyle = 'rgba(255,80,10,0.18)'; ctx.lineWidth = lw
       ctx.beginPath(); ctx.arc(ballX, ballY, arcR, 0, Math.PI * 2); ctx.stroke()
       const elapsed = 1 - ratio
@@ -512,57 +483,66 @@ function draw() {
       ctx.lineCap = 'butt'
     }
   } else if (canShootNow()) {
-    ctx.strokeStyle = '#4f4'; ctx.lineWidth = 2 / zoom
+    ctx.strokeStyle = '#4f4'; ctx.lineWidth = 2 / cam.zoom
     ctx.beginPath(); ctx.arc(ballX, ballY, BALL_RADIUS + 4, 0, Math.PI * 2); ctx.stroke()
   }
 
+  // Parabola preview shows whenever the ball is ready to shoot again — hidden
+  // mid-flight and through the red post-shot delay ring, but visible in both
+  // Hit mode and free-look (so you can survey the shot from a wider view). It's
+  // drawn in the aim-drag color only while a drag has actually moved the angle
+  // (past the dead-zone); otherwise (including the idle non-dragging case) it's white.
+  const parabolaPts = canPreviewShot() ? swing.computeParabolaWorld(ballX, ballY, hole.worldW, hole.worldH) : null
+  const parabolaColor = aiming && aimEngaged ? AIM_DRAG_COLOR : 'rgba(255,255,255,0.85)'
+  if (parabolaPts) swing.drawParabolaWorld(ctx, parabolaPts, cam.zoom, parabolaColor)
+
   ctx.restore()
 
-  if (showingHole) {
-    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 72px monospace'; ctx.textAlign = 'center'
-    ctx.fillText('HOLE!', CANVAS_W / 2, CANVAS_H / 2 - 10)
-    ctx.font = '22px monospace'; ctx.fillStyle = '#aaa'
-    ctx.fillText('ball resets in a moment…', CANVAS_W / 2, CANVAS_H / 2 + 34)
-    ctx.textAlign = 'left'
-  }
+  if (aiming) {
+    ctx.strokeStyle = aimEngaged ? AIM_DRAG_COLOR : 'rgba(255,60,60,0.85)'; ctx.lineWidth = 2
+    ctx.beginPath(); ctx.arc(aimStartSx, aimStartSy, AIM_DEADZONE_R, 0, Math.PI * 2); ctx.stroke()
 
-  const { sx: bsx, sy: bsy } = worldToScreen(ballX, ballY)
-  if (dragging) {
-    const dist = Math.hypot(dragX - bsx, dragY - bsy), ratio = Math.min(dist / MAX_DRAG, 1)
-    const grad = ctx.createLinearGradient(bsx, bsy, dragX, dragY)
-    grad.addColorStop(0, '#4af'); grad.addColorStop(1, powerColor(ratio))
-    ctx.strokeStyle = grad; ctx.lineWidth = 2.5; ctx.setLineDash([5, 4])
-    ctx.beginPath(); ctx.moveTo(bsx, bsy); ctx.lineTo(dragX, dragY); ctx.stroke()
+    ctx.strokeStyle = AIM_DRAG_COLOR; ctx.lineWidth = 2
+    ctx.setLineDash([3, 3])
+    ctx.beginPath(); ctx.moveTo(aimStartSx, aimStartSy); ctx.lineTo(aimCurSx, aimCurSy); ctx.stroke()
     ctx.setLineDash([])
   }
 
-  drawMinimap()
-  const holeDist = Math.max(0, Math.round(hole.holeX - ballX))
+  if (showingHole) {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, cam.cw, cam.ch)
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 72px monospace'; ctx.textAlign = 'center'
+    ctx.fillText('HOLE!', cam.cw / 2, cam.ch / 2 - 10)
+    ctx.font = '22px monospace'; ctx.fillStyle = '#aaa'
+    ctx.fillText('ball resets in a moment…', cam.cw / 2, cam.ch / 2 + 34)
+    ctx.textAlign = 'left'
+  }
+
+  cam.drawMinimapFrame(ctx, (mwx, mwy) => drawMinimapContent(mwx, mwy, parabolaPts, parabolaColor))
+  const miniBox = cam.miniBox()
+  const holeDistPx = Math.hypot(hole.holeX - ballX, tY(hole.holeX) - ballY)
   ctx.fillStyle = '#888'; ctx.font = '12px monospace'
-  ctx.fillText(`hole: ${holeDist}px`, MINI_X + 2, MINI_Y + MINI_H + 18)
+  ctx.fillText(`hole: ${formatDistance(holeDistPx)}`, miniBox.x + 2, miniBox.y + miniBox.h + 18)
+
+  swing.drawHud(ctx, cam.cw, cam.ch)
+}
+
+function updateHud() {
+  const elapsed = ((Date.now() - holeStartMs) / 1000).toFixed(1)
+  chrome.setHud(`Hole ${activeHole + 1}/${courseData.holes.length}    ⏱ ${elapsed}s`)
 }
 
 // ---- Loop ----
 function tick() {
   requestAnimationFrame(tick)  // schedule first — render exceptions can't kill the loop
+  swing.update(Date.now())
   ballX += (physBallX - ballX) * BALL_LERP
   ballY += (physBallY - ballY) * BALL_LERP
   if (!trulyResting && restingDebounceStart !== null && Date.now() - restingDebounceStart >= REST_DEBOUNCE_MS) {
-    trulyResting = true; shotAllowedAt = Date.now() + SHOT_DELAY_MS; cameraMode = 'free'
+    trulyResting = true; shotAllowedAt = Date.now() + SHOT_DELAY_MS
   }
-  if (cameraMode === 'follow') {
-    const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
-    const targetCamX = visW >= hole.worldW
-      ? (hole.worldW - visW) / 2
-      : Math.max(0, Math.min(ballX - visW / 2, hole.worldW - visW))
-    const targetCamY = visH >= hole.worldH
-      ? (hole.worldH - visH) / 2
-      : Math.max(0, Math.min(ballY - visH * 0.65, hole.worldH - visH))
-    camX += (targetCamX - camX) * FOLLOW_CAM_LERP
-    camY += (targetCamY - camY) * FOLLOW_CAM_LERP
-  }
+  cam.update({ x: ballX, y: ballY })
   draw()
+  updateHud()
 }
 requestAnimationFrame(tick)
 
@@ -571,16 +551,13 @@ canvas.addEventListener('mousedown', (e) => {
   const rect = canvas.getBoundingClientRect()
   const cx = e.clientX - rect.left, cy = e.clientY - rect.top
 
-  if (cameraMode === 'free' && cx >= MINI_X && cx <= MINI_X + MINI_W && cy >= MINI_Y && cy <= MINI_Y + MINI_H) {
-    function panTo(px: number, py: number) {
-      const worldX = ((px - MINI_X) / MINI_W) * hole.worldW
-      const worldY = ((py - MINI_Y) / MINI_H) * hole.worldH
-      const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
-      camX = worldX - visW / 2; camY = worldY - visH / 2
-    }
-    panTo(cx, cy)
+  // Minimap: enter free-look and scrub the camera by clicking/dragging on it.
+  if (cam.miniHit(cx, cy)) {
+    cam.enterFreeLook()
+    chrome.sync()
+    cam.miniJump(cx, cy)
     function onMiniMove(ev: MouseEvent) {
-      const r = canvas.getBoundingClientRect(); panTo(ev.clientX - r.left, ev.clientY - r.top)
+      const r = canvas.getBoundingClientRect(); cam.miniJump(ev.clientX - r.left, ev.clientY - r.top)
     }
     function onMiniUp() {
       window.removeEventListener('mousemove', onMiniMove); window.removeEventListener('mouseup', onMiniUp)
@@ -589,49 +566,82 @@ canvas.addEventListener('mousedown', (e) => {
     return
   }
 
-  if (!canShootNow()) return
-  dragging = true
-
-  function clamp(mx: number, my: number) {
-    const { sx, sy } = worldToScreen(ballX, ballY)
-    const dx = mx - sx, dy = my - sy, d = Math.hypot(dx, dy)
-    if (d > MAX_DRAG) { const s = MAX_DRAG / d; return { x: sx + dx * s, y: sy + dy * s } }
-    return { x: mx, y: my }
+  const hud = swing.hitTestHud(cx, cy, cam.cw, cam.ch)
+  if (hud) {
+    if (hud === 'hit') {
+      pressHitShortcut()
+    } else {
+      swing.handleHudClick(hud)
+    }
+    return
   }
-  const init = clamp(cx, cy); dragX = init.x; dragY = init.y
+
+  if (cam.mode === 'free') {
+    // Left-drag pans the view.
+    let panLastX = cx, panLastY = cy
+    canvas.style.cursor = 'grabbing'
+    function onMove(ev: MouseEvent) {
+      const r = canvas.getBoundingClientRect()
+      const mx = ev.clientX - r.left, my = ev.clientY - r.top
+      cam.panBy(mx - panLastX, my - panLastY)
+      panLastX = mx; panLastY = my
+    }
+    function onUp() {
+      canvas.style.cursor = 'grab'
+      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+    return
+  }
+
+  if (!canShootNow()) return
+
+  // Aim is set from the drag's start -> current point, not from the ball's
+  // screen position — the click doesn't need to land on the ball. Staying
+  // within AIM_DEADZONE_R of the start is a dead zone: the angle is left at
+  // whatever it was before this drag, so releasing there cancels cleanly.
+  const startSx = cx, startSy = cy
+  const preDragAngle = swing.aimAngle
+  aiming = true; aimStartSx = startSx; aimStartSy = startSy; aimCurSx = cx; aimCurSy = cy
+
+  function applyAim(mx: number, my: number) {
+    aimCurSx = mx; aimCurSy = my
+    const dist = Math.hypot(mx - startSx, my - startSy)
+    aimEngaged = dist > AIM_DEADZONE_R
+    if (aimEngaged) swing.setAimFromScreen(startSx, startSy, mx, my)
+    else swing.aimAngle = preDragAngle
+  }
+  applyAim(cx, cy)
 
   function onMove(ev: MouseEvent) {
     const r = canvas.getBoundingClientRect()
-    const c = clamp(ev.clientX - r.left, ev.clientY - r.top)
-    dragX = c.x; dragY = c.y
+    applyAim(ev.clientX - r.left, ev.clientY - r.top)
   }
   function onUp(ev: MouseEvent) {
-    dragging = false
     window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
+    aiming = false
     const r = canvas.getBoundingClientRect()
-    const mx = ev.clientX - r.left, my = ev.clientY - r.top
-    const { sx, sy } = worldToScreen(ballX, ballY)
-    if (Math.hypot(mx - sx, my - sy) <= BALL_RADIUS * zoom + 4) return
-    const c = clamp(mx, my)
-    ws.send(JSON.stringify({ type: 'shoot', vx: (sx - c.x) * POWER_SCALE, vy: (sy - c.y) * POWER_SCALE }))
+    applyAim(ev.clientX - r.left, ev.clientY - r.top)
   }
   window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
 })
 
 // ---- WebSocket ----
-const ws = new WebSocket('ws://localhost:8080/ws')
+function getWsUrl(): string {
+  const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined
+  if (envUrl && envUrl.trim().length > 0) return envUrl
+
+  const { protocol, host } = window.location
+  const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${wsProtocol}//${host}/ws`
+}
+const ws = new WebSocket(getWsUrl())
 
 // The server starts on whichever course it loaded from disk; we push the
 // client's active course on connect so both sides agree on what's being played
 // (without this the server keeps simulating its own terrain after a reload,
 // which made the ball spawn underground until an edit nudged an update).
 ws.onopen = () => { sendActiveCourse() }
-
-function centerCamOn(wx: number, wy: number) {
-  const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
-  camX = Math.max(0, Math.min(wx - visW / 2, hole.worldW - visW))
-  camY = Math.max(0, Math.min(wy - visH * 0.65, hole.worldH - visH))
-}
 
 // `state` messages carry ball kinematics while it's in motion (and the settle
 // frame). Discrete `event` messages drive the hole/water/reset transitions that
@@ -647,11 +657,10 @@ function onState(x: number, y: number, resting: boolean) {
   if (!resting) {
     restingDebounceStart = null
     if (trulyResting) { trulyResting = false; shotAllowedAt = 0 }
-    if (prevResting) {
-      ballX = physBallX; ballY = physBallY
-      centerCamOn(physBallX, physBallY)
-      cameraMode = 'follow'
-    }
+    // The camera continuously follow-lerps toward the ball whenever cam.mode is
+    // 'follow' (see tick()), so no hard snap is needed here — and any shot that
+    // just started motion required follow mode in the first place.
+    if (prevResting) { ballX = physBallX; ballY = physBallY }
   } else if (restingDebounceStart === null) {
     restingDebounceStart = Date.now()
   }
@@ -680,16 +689,14 @@ function onEvent(m: { event: string; x: number; y: number; vx?: number; vy?: num
       trulyResting = true; restingDebounceStart = null
       shotAllowedAt = Date.now() + 2 * SHOT_DELAY_MS
       physBallX = m.x; physBallY = m.y; ballX = m.x; ballY = m.y
-      centerCamOn(m.x, m.y)
-      cameraMode = 'free'
+      cam.centerOn(m.x, m.y)
       break
     case 'reset':
       showingHole = false; inWaterSinking = false; inWaterPenalty = false
       trulyResting = true; restingDebounceStart = null; shotAllowedAt = 0
       prevResting = true
       physBallX = m.x; physBallY = m.y; ballX = m.x; ballY = m.y
-      centerCamOn(m.x, m.y)
-      cameraMode = 'free'
+      cam.centerOn(m.x, m.y)
       break
   }
 }
@@ -717,11 +724,34 @@ const editor = initEditor({
   },
 })
 
-editorBtn.addEventListener('click', () => editor.show())
-
-// ---- Dev shortcuts ----
-document.addEventListener('keydown', (e) => {
+// ---- Keyboard (menu/camera/swing shortcuts + dev shortcuts) ----
+// Scoped to onEnter/onExit (below) so single-player's shortcuts and free-look
+// keys don't fire while a different screen is active — matches matchScreen.ts.
+//   Escape        — open/close the hamburger menu
+//   Enter or M    — toggle Free-look <-> Hit mode
+//   Arrow keys    — enter Free-look and pan (held)
+//   Space         — in Free-look, return to Hit mode; in Hit mode, press Hit!
+//   1 / 2 / 3     — driver / pitching wedge / putter
+//   4 / 5 / 6     — backspin / no spin / topspin
+function pressHitShortcut() {
+  if (!canShootNow()) return
+  const res = swing.pressHit(Date.now())
+  if (res) {
+    const { vx, vy } = swing.getLaunchVelocity(res.powerPct)
+    launch(vx, vy)
+  }
+}
+function onKeyDown(e: KeyboardEvent) {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+  if (e.key === 'Escape') { e.preventDefault(); chrome.toggleMenu(); return }
+  if (cam.onKeyDown(e)) { e.preventDefault(); chrome.sync(); return }
+  if (e.key === ' ') { e.preventDefault(); pressHitShortcut(); return }
+  if (e.key === '1') { swing.club = 'driver'; return }
+  if (e.key === '2') { swing.club = 'wedge'; return }
+  if (e.key === '3') { swing.club = 'putter'; return }
+  if (e.key === '4') { swing.spin = 'back'; return }
+  if (e.key === '5') { swing.spin = 'none'; return }
+  if (e.key === '6') { swing.spin = 'top'; return }
   if (e.key === 'r' || e.key === 'R') ws.send(JSON.stringify({ type: 'reset', tee: 'back' }))
   else if (e.key === 't' || e.key === 'T') ws.send(JSON.stringify({ type: 'reset', tee: 'forward' }))
   else if (e.key === 'e' || e.key === 'E') {
@@ -733,7 +763,8 @@ document.addEventListener('keydown', (e) => {
     inWaterSinking = false
     showingHole = false
   }
-})
+}
+function onKeyUp(e: KeyboardEvent) { cam.onKeyUp(e) }
 
 // Load the initial course from the server on startup (disk is the source of
 // truth — no localStorage). Falls back to a fresh default course if the server
@@ -754,6 +785,15 @@ loadInitialCourse()
 
 if (opts.openEditor) editor.show()
 
-return { openEditor: () => editor.show() }
+return {
+  openEditor: () => editor.show(),
+  onEnter() { window.addEventListener('keydown', onKeyDown); window.addEventListener('keyup', onKeyUp) },
+  onExit() {
+    window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp)
+    cam.exitFreeLook()
+    chrome.sync()
+    chrome.closeMenu()
+  },
+}
 }
 

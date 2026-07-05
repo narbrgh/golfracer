@@ -1,7 +1,12 @@
 // Client-side access to the server's in-memory online rooms. The room browser
 // reads the list over HTTP; creating/joining a room and all in-room actions go
 // over the /lobby WebSocket (see lobbyNet.ts). Rooms are ephemeral.
-const BASE = 'http://localhost:8080'
+function getApiBase(): string {
+  const envUrl = (import.meta as any).env?.VITE_API_URL as string | undefined
+  if (envUrl && envUrl.trim().length > 0) return envUrl
+  return `${window.location.protocol}//${window.location.host}`
+}
+const BASE = getApiBase()
 
 export interface RoomSummary {
   id: string

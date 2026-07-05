@@ -168,16 +168,13 @@ type TerrainSegment struct {
 }
 
 // Bunker is a sand trap whose visible region sits between a user-drawn
-// Catmull-Rom top edge (the rim/lip) and the terrain surface below it.
-// When the ball is inside the bunker it experiences extra rolling friction;
-// when shot out, the launch velocity is scaled by a multiplier that depends
-// on how steeply the ball entered (depth factor captured at entry).
+// Catmull-Rom top edge (the rim/lip) and the terrain surface below it. Ball
+// physics inside a bunker (extra rolling friction, reduced shot power when hit
+// out) is governed by global tunables — physics.Current.BunkerFriction and the
+// per-club penalties — rather than per-bunker fields, so every bunker on every
+// hole behaves the same.
 type Bunker struct {
-	TopEdge       []ControlPoint `json:"topEdge"`
-	Friction      float64        `json:"friction"`      // rolling-friction multiplier (default 4)
-	ShallowMult   float64        `json:"shallowMult"`   // shot multiplier at depth=0 (default 0.75)
-	DeepMult      float64        `json:"deepMult"`      // shot multiplier at depth=1 (default 0.25)
-	DeepThreshold float64        `json:"deepThreshold"` // VY px/s that maps to depth=1 (default 300)
+	TopEdge []ControlPoint `json:"topEdge"`
 }
 
 // Platform is a convex or concave polygon that the ball can bounce off.

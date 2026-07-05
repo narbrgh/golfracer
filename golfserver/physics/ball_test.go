@@ -45,8 +45,8 @@ func TestBallFallsAndSettles(t *testing.T) {
 		t.Fatalf("expected ball resting at y=%.2f, got y=%.2f", expectedRestY, ball.Y)
 	}
 	speed := math.Hypot(ball.VX, ball.VY)
-	if speed >= RestSpeedThreshold {
-		t.Fatalf("expected speed < %.1f at rest, got %.2f (vx=%.2f vy=%.2f)", RestSpeedThreshold, speed, ball.VX, ball.VY)
+	if speed >= Current.RestSpeedThreshold {
+		t.Fatalf("expected speed < %.1f at rest, got %.2f (vx=%.2f vy=%.2f)", Current.RestSpeedThreshold, speed, ball.VX, ball.VY)
 	}
 }
 

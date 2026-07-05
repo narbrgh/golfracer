@@ -1416,8 +1416,8 @@ export function initEditor(opts: {
     const { sec, content } = mksec('World')
     // Width/Height feed the max of other sliders (Hole X, tees, Base Y), so rebuild
     // the sidebar on release to refresh those ranges.
-    content.appendChild(sliderRow('Width',  hole.worldW,     500, 8000, 50,  v => { hole.worldW    = v; emit() }, undefined, rebuild))
-    content.appendChild(sliderRow('Height', hole.worldH,     400, 2000, 50,  v => { hole.worldH    = v; emit() }, undefined, rebuild))
+    content.appendChild(sliderRow('Width',  hole.worldW,     500, 20000, 50,  v => { hole.worldW    = v; emit() }, undefined, rebuild))
+    content.appendChild(sliderRow('Height', hole.worldH,     400, 5000, 50,  v => { hole.worldH    = v; emit() }, undefined, rebuild))
     content.appendChild(sliderRow('Base Y', hole.baseGround,  50, hole.worldH - 50, 10, v => { hole.baseGround = v; emit() }))
     sidebar.appendChild(sec)
   }
@@ -1543,7 +1543,6 @@ export function initEditor(opts: {
       const ptY = makePtY(segs, spCoeffs)
       const newBunker: Bunker = {
         topEdge: makeDefaultBunker(cx, ptY),
-        friction: 4, shallowMult: 0.75, deepMult: 0.25, deepThreshold: 300,
       }
       hole.bunkers.push(newBunker)
       selectBunker(hole.bunkers.length - 1)
@@ -1582,11 +1581,6 @@ export function initEditor(opts: {
       b.topEdge = b.topEdge.map(p => ({ x: p.x + delta, y: p.y }))
       emit()
     }))
-    el.appendChild(sliderRow('Friction',       b.friction,      1, 20,  0.5, v => { b.friction      = v; emit() }))
-    el.appendChild(sliderRow('Shallow mult',   b.shallowMult,   0,  1, 0.05, v => { b.shallowMult   = v; emit() }, v => v.toFixed(2)))
-    el.appendChild(sliderRow('Deep mult',      b.deepMult,      0,  1, 0.05, v => { b.deepMult      = v; emit() }, v => v.toFixed(2)))
-    el.appendChild(sliderRow('Deep threshold', b.deepThreshold, 50, 800, 25, v => { b.deepThreshold = v; emit() }))
-
     const hint = document.createElement('div')
     hint.style.cssText = 'font:11px monospace;color:#666;padding:2px 0 4px 0'
     hint.textContent = `${b.topEdge.length} rim points  (click preview to edit)`
