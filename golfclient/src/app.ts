@@ -25,7 +25,7 @@ screens.register(
   }),
 )
 
-screens.register(createKenScreen({ onBack: () => screens.show('mainMenu') }))
+screens.register(createKenScreen({ onBack: () => screens.back() }))
 
 // --- Game screen (Single Player / Map Editor) ---
 // Mounts the existing single-player game once; later entries just toggle it back

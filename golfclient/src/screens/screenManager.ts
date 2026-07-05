@@ -18,6 +18,7 @@ export class ScreenManager {
   private readonly screens = new Map<string, Screen>()
   private readonly roots = new Map<string, HTMLElement>()
   private currentId: string | null = null
+  private previousId: string | null = null
   private readonly host: HTMLElement
 
   constructor(host: HTMLElement) {
@@ -48,6 +49,7 @@ export class ScreenManager {
       const cur = this.screens.get(this.currentId)!
       cur.onExit?.()
       this.roots.get(this.currentId)!.style.display = 'none'
+      this.previousId = this.currentId
     }
 
     let root = this.roots.get(id)
@@ -59,5 +61,11 @@ export class ScreenManager {
     root.style.display = ''
     this.currentId = id
     screen.onEnter?.(params)
+  }
+
+  back(): void {
+    if (this.previousId) {
+      this.show(this.previousId)
+    }
   }
 }
