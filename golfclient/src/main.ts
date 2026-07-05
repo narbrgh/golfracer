@@ -631,9 +631,9 @@ function getWsUrl(): string {
   const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined
   if (envUrl && envUrl.trim().length > 0) return envUrl
 
-  const { protocol, host } = window.location
+  const { protocol } = window.location
   const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${wsProtocol}//${host}/ws`
+  return `${wsProtocol}//api.golfracer.com/ws`
 }
 const ws = new WebSocket(getWsUrl())
 

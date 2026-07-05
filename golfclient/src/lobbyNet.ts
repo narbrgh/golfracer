@@ -90,9 +90,9 @@ export class LobbyNet {
   }
 
   private defaultWsUrl(): string {
-    const { protocol, host } = window.location
+    const { protocol } = window.location
     const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${wsProtocol}//${host}/ws`
+    return `${wsProtocol}//api.golfracer.com/ws`
   }
 
   connect(): void {

@@ -4,7 +4,7 @@
 function getApiBase(): string {
   const envUrl = (import.meta as any).env?.VITE_API_URL as string | undefined
   if (envUrl && envUrl.trim().length > 0) return envUrl
-  return `${window.location.protocol}//${window.location.host}`
+  return `${window.location.protocol}//api.golfracer.com`
 }
 const BASE = getApiBase()
 
