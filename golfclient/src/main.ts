@@ -12,7 +12,7 @@ import './gameChrome.css'
 // also means the WebSocket only connects once the game is actually entered.
 // Returns a small handle so callers can open the map-editor overlay and (scoped to
 // when this screen is actually active) attach/detach the camera's keyboard listeners.
-export function mountGame(host: HTMLElement, opts: { openEditor?: boolean; onBack?: () => void } = {}): { openEditor: () => void; onEnter: () => void; onExit: () => void } {
+export function mountGame(host: HTMLElement, opts: { openEditor?: boolean; onBack?: () => void; onKen?: () => void } = {}): { openEditor: () => void; onEnter: () => void; onExit: () => void } {
 
 // ---- Canvas / render constants ----
 // Canvas grows with the window but never below this floor (see mountGameChrome).
@@ -146,6 +146,7 @@ const chrome = mountGameChrome(host, cam, {
   minH: MIN_H,
   menuItems: [
     { label: 'Map Editor', onClick: () => editor.show() },
+    { label: 'Ken', onClick: () => opts.onKen?.(), style: 'background: #ff9900' },
     { label: 'Back to Menu', onClick: () => opts.onBack?.() },
   ],
 })

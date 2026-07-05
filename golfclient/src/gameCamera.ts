@@ -181,7 +181,7 @@ export class GameCamera {
   }
 }
 
-export interface ChromeMenuItem { label: string; onClick: () => void }
+export interface ChromeMenuItem { label: string; onClick: () => void; style?: string }
 
 export interface GameChromeHandle {
   root: HTMLElement
@@ -240,20 +240,27 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   for (const item of opts.menuItems) {
     const btn = document.createElement('button')
     btn.className = 'gc-item'
-    btn.textContent = item.label
+    btn.textContent = item.label === 'Back to Menu' ? 'Quit Game' : item.label
+    if (item.style) btn.style.cssText = item.style
     btn.addEventListener('click', () => { menuPanelEl.style.display = 'none'; item.onClick() })
     menuPanelEl.appendChild(btn)
   }
-  const closeBtn = document.createElement('button')
-  closeBtn.className = 'gc-item gc-item-close'
-  closeBtn.textContent = 'Close Menu'
-  closeBtn.addEventListener('click', () => { menuPanelEl.style.display = 'none' })
-  menuPanelEl.appendChild(closeBtn)
 
+  function closeMenu() { menuPanelEl.style.display = 'none' }
   function toggleMenu() {
     menuPanelEl.style.display = menuPanelEl.style.display === 'none' ? '' : 'none'
   }
   menuToggleEl.addEventListener('click', toggleMenu)
+  root.addEventListener('click', (e) => {
+    if (menuPanelEl.style.display !== 'none' && e.target !== menuToggleEl && !menuPanelEl.contains(e.target as Node)) {
+      closeMenu()
+    }
+  })
+  root.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && menuPanelEl.style.display !== 'none') {
+      closeMenu()
+    }
+  })
 
   const nudge = (dir: string) => cam.nudge(dir as 'up' | 'down' | 'left' | 'right')
   for (const btn of Array.from(arrowsEl.querySelectorAll<HTMLButtonElement>('[data-pan]'))) {

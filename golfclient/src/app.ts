@@ -39,7 +39,7 @@ screens.register({
   mount() {
     const root = document.createElement('div')
     root.className = 'screen game-screen'
-    game = mountGame(root, { onBack: () => screens.show('mainMenu') })
+    game = mountGame(root, { onBack: () => screens.show('mainMenu'), onKen: () => screens.show('ken') })
     return root
   },
   onEnter(params) {
