@@ -53,12 +53,24 @@ function heroSvg(): string {
     </svg>`
 }
 
+let buildNumber = 1
+function getBuildNumber(): number {
+  const stored = localStorage.getItem('buildNumber')
+  if (stored) buildNumber = parseInt(stored, 10)
+  return buildNumber
+}
+export function incrementBuildNumber(): void {
+  buildNumber++
+  localStorage.setItem('buildNumber', buildNumber.toString())
+}
+
 export function createMainMenu(handlers: MainMenuHandlers): Screen {
   return {
     id: 'mainMenu',
     mount() {
       const root = document.createElement('div')
       root.className = 'screen main-menu'
+      const currentBuild = getBuildNumber()
       root.innerHTML = `
         <div class="mm-frame">
           ${heroSvg()}
@@ -67,7 +79,8 @@ export function createMainMenu(handlers: MainMenuHandlers): Screen {
             <button class="mm-btn mm-online" type="button" data-action="online">Online</button>
             <button class="mm-btn mm-editor" type="button" data-action="editor">Map Editor</button>
           </div>
-        </div>`
+        </div>
+        <div class="mm-build-number">Build #${currentBuild}</div>`
       const on = (action: string, fn: () => void) =>
         root.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)!.addEventListener('click', fn)
       on('single', handlers.onSinglePlayer)

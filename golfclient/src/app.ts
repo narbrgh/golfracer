@@ -1,6 +1,6 @@
 import './app.css'
 import { ScreenManager } from './screens/screenManager'
-import { createMainMenu } from './screens/mainMenu'
+import { createMainMenu, incrementBuildNumber } from './screens/mainMenu'
 import { createOnlineMenu } from './screens/online'
 import { createRoomsBrowser } from './screens/roomsBrowser'
 import { createRoomLobby } from './screens/roomLobby'
@@ -14,6 +14,7 @@ import { LobbyNet } from './lobbyNet'
 const host = document.getElementById('app')
 if (!host) throw new Error('#app root not found')
 
+incrementBuildNumber()
 const screens = new ScreenManager(host)
 
 screens.register(
