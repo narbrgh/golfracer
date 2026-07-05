@@ -22,7 +22,6 @@ screens.register(
     onSinglePlayer: () => screens.show('game', { openEditor: false }),
     onOnline: () => screens.show('online'),
     onEditor: () => screens.show('game', { openEditor: true }),
-    onKen: () => screens.show('ken'),
   }),
 )
 
