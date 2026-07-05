@@ -88,13 +88,32 @@ func SplineSlope(x float64, coeffs []SplineCoeff) float64 {
 }
 
 // ComputeTerrainY and ComputeTerrainSlope handle all four mode combinations.
+// SplineBaseRef is the neutral Base-Y reference for spline terrain — see the TS
+// SPLINE_BASE_REF in golfclient/src/terrain.ts (must match). BaseGround acts as an
+// offset from this so the Base Y slider shifts the whole spline terrain.
+const SplineBaseRef = 650.0
+
+// BaseOffset is the vertical shift Base Y applies to authored-absolute geometry
+// (spline control points, bunker rims, water level) so they track the terrain.
+func BaseOffset(c Hole) float64 { return c.BaseGround - SplineBaseRef }
+
+// BunkerRimCoeffs builds a bunker's rim spline shifted by the hole's Base-Y offset.
+func BunkerRimCoeffs(c Hole, topEdge []ControlPoint) []SplineCoeff {
+	off := BaseOffset(c)
+	shifted := make([]ControlPoint, len(topEdge))
+	for i, p := range topEdge {
+		shifted[i] = ControlPoint{X: p.X, Y: p.Y + off}
+	}
+	return BuildSpline(shifted)
+}
+
 func ComputeTerrainY(x float64, c Hole, segs []BuiltSegment, coeffs []SplineCoeff) float64 {
 	s, w := c.UseSpline, c.UseWaves
 	if s && w {
-		return SplineY(x, coeffs) + TerrainY(x, segs) - c.BaseGround
+		return SplineY(x, coeffs) + TerrainY(x, segs) - SplineBaseRef
 	}
 	if s {
-		return SplineY(x, coeffs)
+		return SplineY(x, coeffs) + c.BaseGround - SplineBaseRef
 	}
 	if w {
 		return TerrainY(x, segs)

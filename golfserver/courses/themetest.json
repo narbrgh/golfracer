@@ -1,0 +1,90 @@
+{
+  "formatVersion": 1,
+  "id": "themetest",
+  "name": "ThemeTest",
+  "holes": [
+    {
+      "worldW": 900,
+      "worldH": 1000,
+      "baseGround": 650,
+      "teeBackX": 200,
+      "teeForwardX": 400,
+      "holeX": 500,
+      "useSpline": false,
+      "controlPoints": [
+        {
+          "x": 0,
+          "y": 650
+        },
+        {
+          "x": 700,
+          "y": 570
+        },
+        {
+          "x": 1400,
+          "y": 710
+        },
+        {
+          "x": 2100,
+          "y": 625
+        },
+        {
+          "x": 2800,
+          "y": 695
+        },
+        {
+          "x": 3500,
+          "y": 610
+        },
+        {
+          "x": 4000,
+          "y": 650
+        }
+      ],
+      "useWaves": false,
+      "segments": [
+        {
+          "length": 4000,
+          "waves": [
+            {
+              "amplitude": 80,
+              "period": 800,
+              "phase": 0
+            },
+            {
+              "amplitude": 40,
+              "period": 300,
+              "phase": 0
+            },
+            {
+              "amplitude": 20,
+              "period": 150,
+              "phase": 0
+            }
+          ]
+        }
+      ],
+      "hazards": [],
+      "bunkers": [],
+      "platforms": [],
+      "theme": {
+        "skyTop": "#ff8800",
+        "skyBottom": "#ffcc00",
+        "mountain1": "#123456",
+        "mountain1Y": 0.5,
+        "mountain2": "#654321",
+        "mountain2Y": 0.6,
+        "groundFill": "#00aa44",
+        "groundLine": "#ffffff",
+        "groundLineW": 2,
+        "waterFill": "#2288ff",
+        "waterLineW": 2,
+        "waterLine": "#aaddff",
+        "sunColor": "#ffffff",
+        "sunRing1": "#ffeeaa",
+        "sunRing2": "#ffcc88",
+        "sunSize": 30
+      }
+    }
+  ]
+}

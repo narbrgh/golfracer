@@ -1,0 +1,258 @@
+{
+  "formatVersion": 1,
+  "id": "alex",
+  "name": "alex",
+  "holes": [
+    {
+      "worldW": 7350,
+      "worldH": 1350,
+      "baseGround": 710,
+      "teeBackX": 200,
+      "teeForwardX": 400,
+      "holeX": 6400,
+      "useSpline": true,
+      "controlPoints": [
+        {
+          "x": 0,
+          "y": 858.498632010944
+        },
+        {
+          "x": 64.54783291348598,
+          "y": 921.4284489012487
+        },
+        {
+          "x": 167.60741501022542,
+          "y": 872.8715304133617
+        },
+        {
+          "x": 483.7228639415705,
+          "y": 842.1518472883721
+        },
+        {
+          "x": 748.3085218245458,
+          "y": 935.301854183502
+        },
+        {
+          "x": 1251.8125854993161,
+          "y": 833.3618331053352
+        },
+        {
+          "x": 1975.7523939808482,
+          "y": 923.8543091655267
+        },
+        {
+          "x": 2624.2818057455543,
+          "y": 878.6080711354309
+        },
+        {
+          "x": 3398.495212038304,
+          "y": 943.9637482900138
+        },
+        {
+          "x": 3971.0463085,
+          "y": 866.8778554999999
+        },
+        {
+          "x": 4801.128590971272,
+          "y": 1014.3467852257182
+        },
+        {
+          "x": 6017.9597645,
+          "y": 1049.7100025
+        },
+        {
+          "x": 6214.6030355,
+          "y": 1047.9384415
+        },
+        {
+          "x": 6427.190355500001,
+          "y": 1090.4559055
+        },
+        {
+          "x": 6554.7427475,
+          "y": 1067.4256124999997
+        },
+        {
+          "x": 7405.30095759234,
+          "y": 1160.140218878249
+        }
+      ],
+      "useWaves": true,
+      "segments": [
+        {
+          "length": 4000,
+          "waves": [
+            {
+              "amplitude": 80,
+              "period": 800,
+              "phase": 0
+            },
+            {
+              "amplitude": 40,
+              "period": 300,
+              "phase": 0
+            },
+            {
+              "amplitude": 20,
+              "period": 150,
+              "phase": 0
+            }
+          ]
+        }
+      ],
+      "hazards": [
+        {
+          "kind": "water",
+          "cx": 2100,
+          "w": 0,
+          "h": 0,
+          "level": 895
+        }
+      ],
+      "bunkers": [
+        {
+          "topEdge": [
+            {
+              "x": 4440.625,
+              "y": 1038.125
+            },
+            {
+              "x": 4500.625,
+              "y": 964.791666666667
+            },
+            {
+              "x": 4667.291666666666,
+              "y": 918.125
+            },
+            {
+              "x": 4847.291666666666,
+              "y": 898.125
+            },
+            {
+              "x": 5133.958333333334,
+              "y": 971.4583333333335
+            },
+            {
+              "x": 5243.717706833333,
+              "y": 1011.2893491666671
+            }
+          ],
+          "friction": 4,
+          "shallowMult": 0.75,
+          "deepMult": 0.25,
+          "deepThreshold": 300
+        }
+      ],
+      "platforms": [],
+      "theme": {
+        "skyTop": "#a4eff9",
+        "skyBottom": "#ff6a1a",
+        "mountain1": "#1c3021",
+        "mountain1Y": 0.55,
+        "mountain2": "#25412f",
+        "mountain2Y": 0.64,
+        "groundFill": "#35921c",
+        "groundLine": "#384d23",
+        "groundLineW": 3.5,
+        "waterFill": "#1655e1",
+        "waterLineW": 1.5,
+        "waterLine": "#96d2ff",
+        "sunColor": "#e6e600",
+        "sunRing1": "#7ad3ff",
+        "sunRing2": "#d9d9d9",
+        "sunSize": 32
+      }
+    },
+    {
+      "worldW": 4000,
+      "worldH": 1000,
+      "baseGround": 650,
+      "teeBackX": 200,
+      "teeForwardX": 400,
+      "holeX": 3700,
+      "useSpline": false,
+      "controlPoints": [
+        {
+          "x": 0,
+          "y": 650
+        },
+        {
+          "x": 700,
+          "y": 570
+        },
+        {
+          "x": 1400,
+          "y": 710
+        },
+        {
+          "x": 2100,
+          "y": 625
+        },
+        {
+          "x": 2800,
+          "y": 695
+        },
+        {
+          "x": 3500,
+          "y": 610
+        },
+        {
+          "x": 4000,
+          "y": 650
+        }
+      ],
+      "useWaves": true,
+      "segments": [
+        {
+          "length": 4000,
+          "waves": [
+            {
+              "amplitude": 80,
+              "period": 800,
+              "phase": 0
+            },
+            {
+              "amplitude": 40,
+              "period": 300,
+              "phase": 0
+            },
+            {
+              "amplitude": 20,
+              "period": 150,
+              "phase": 0
+            }
+          ]
+        }
+      ],
+      "hazards": [
+        {
+          "kind": "water",
+          "cx": 2080,
+          "w": 0,
+          "h": 0,
+          "level": 715
+        }
+      ],
+      "bunkers": [],
+      "platforms": [],
+      "theme": {
+        "skyTop": "#07071a",
+        "skyBottom": "#111125",
+        "mountain1": "#1c1c30",
+        "mountain1Y": 0.45,
+        "mountain2": "#252540",
+        "mountain2Y": 0.58,
+        "groundFill": "#252515",
+        "groundLine": "#667755",
+        "groundLineW": 2,
+        "waterFill": "#1655e1",
+        "waterLineW": 1.5,
+        "waterLine": "#96d2ff",
+        "sunColor": "#ffe9b8",
+        "sunRing1": "#ffd27a",
+        "sunRing2": "#ffd27a",
+        "sunSize": 32
+      }
+    }
+  ]
+}

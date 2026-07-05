@@ -2,16 +2,19 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"golf01/server/coursestore"
 	"golf01/server/physics"
+	"golf01/server/rooms"
 	"golf01/server/terrain"
 )
 
@@ -59,6 +62,26 @@ type ballState struct {
 	InWater bool    `json:"inWater,omitempty"`
 }
 
+// Server -> client wire messages. `state` carries ball kinematics and is sent
+// only while the ball is moving (plus the single frame where it settles) — at
+// rest the server stays silent. `event` marks discrete transitions the client
+// turns into animations/sounds instead of inferring them from position deltas.
+type stateMsg struct {
+	Type    string  `json:"type"` // "state"
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+	Resting bool    `json:"resting"`
+}
+
+type eventMsg struct {
+	Type  string  `json:"type"`  // "event"
+	Event string  `json:"event"` // shotFired | sank | enteredWater | penaltyStart | reset
+	X     float64 `json:"x"`
+	Y     float64 `json:"y"`
+	VX    float64 `json:"vx,omitempty"`
+	VY    float64 `json:"vy,omitempty"`
+}
+
 // clientMsg covers shoot, course (live preview), selectHole, reset, and
 // skipTimer messages.
 type clientMsg struct {
@@ -98,6 +121,11 @@ func (h *hub) broadcast(msg []byte) {
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		c.WriteMessage(websocket.TextMessage, msg)
+	}
+}
+func (h *hub) broadcastJSON(v any) {
+	if msg, err := json.Marshal(v); err == nil {
+		h.broadcast(msg)
 	}
 }
 
@@ -140,15 +168,17 @@ func main() {
 	// waterTraps is recomputed whenever the course changes.
 	computeWaterTraps := func() []waterTrap {
 		var traps []waterTrap
+		waterOff := terrain.BaseOffset(hole)
 		for _, hz := range hole.Hazards {
 			if hz.Kind != "water" {
 				continue
 			}
-			l, r, ok := terrain.WaterPoolBounds(hz.CX, hz.Level, cty, hole.WorldW)
+			wl := hz.Level + waterOff
+			l, r, ok := terrain.WaterPoolBounds(hz.CX, wl, cty, hole.WorldW)
 			if !ok {
 				continue
 			}
-			traps = append(traps, waterTrap{cx: hz.CX, l: l, r: r, surface: hz.Level})
+			traps = append(traps, waterTrap{cx: hz.CX, l: l, r: r, surface: wl})
 		}
 		return traps
 	}
@@ -192,7 +222,7 @@ func main() {
 			if len(b.TopEdge) < 2 {
 				continue
 			}
-			coeffs := terrain.BuildSpline(b.TopEdge)
+			coeffs := terrain.BunkerRimCoeffs(hole, b.TopEdge)
 			leftX, rightX := b.TopEdge[0].X, b.TopEdge[0].X
 			for _, p := range b.TopEdge {
 				if p.X < leftX {
@@ -282,7 +312,7 @@ func main() {
 			if len(b.TopEdge) < 2 {
 				continue
 			}
-			coeffs := terrain.BuildSpline(b.TopEdge)
+			coeffs := terrain.BunkerRimCoeffs(hole, b.TopEdge)
 			leftX, rightX := b.TopEdge[0].X, b.TopEdge[0].X
 			for _, p := range b.TopEdge {
 				if p.X < leftX {
@@ -366,11 +396,24 @@ func main() {
 
 	h := &hub{clients: make(map[*websocket.Conn]struct{})}
 
+	// Change-based broadcasting: remember the last `state` frame we sent so we can
+	// skip re-sending an unchanged one while the ball rests (the loop stays silent
+	// at rest instead of spamming 60 identical frames/sec).
+	var lastSentX, lastSentY float64
+	var lastSentResting bool
+	haveSent := false
+
 	go func() {
 		ticker := time.NewTicker(tickRate)
 		defer ticker.Stop()
 		for range ticker.C {
 			ballMu.Lock()
+			var toSend [][]byte
+			emit := func(v any) {
+				if b, err := json.Marshal(v); err == nil {
+					toSend = append(toSend, b)
+				}
+			}
 			var state ballState
 			switch {
 			case inHoleTicks > 0:
@@ -378,6 +421,7 @@ func main() {
 				inHoleTicks--
 				if inHoleTicks == 0 {
 					ball = physics.NewBall(hole.TeeBackX, startY(), 10)
+					emit(eventMsg{Type: "event", Event: "reset", X: ball.X, Y: ball.Y})
 				}
 
 			case sinkTicks > 0:
@@ -396,6 +440,7 @@ func main() {
 					ball.VX, ball.VY = 0, 0
 					ball.Resting = true
 					inWaterTicks = waterPenaltyTicks
+					emit(eventMsg{Type: "event", Event: "penaltyStart", X: penaltyX, Y: penaltyY})
 				}
 
 			case inWaterTicks > 0:
@@ -490,6 +535,7 @@ func main() {
 					sinkEntryX, sinkEntryY = ball.X, ball.Y
 					ball.VX, ball.VY = 0, 0
 					sinkTicks = sinkTotalTicks
+					emit(eventMsg{Type: "event", Event: "enteredWater", X: ball.X, Y: ball.Y})
 					state = ballState{X: ball.X, Y: ball.Y, Resting: false, InWater: true}
 				} else if overHole && ball.Y > cty(hole.HoleX) {
 					ball.X = hole.HoleX
@@ -497,6 +543,7 @@ func main() {
 					ball.VX, ball.VY = 0, 0
 					ball.Resting = true
 					inHoleTicks = holeHoldTicks
+					emit(eventMsg{Type: "event", Event: "sank", X: ball.X, Y: ball.Y})
 					state = ballState{X: ball.X, Y: ball.Y, Resting: true, InHole: true}
 				} else {
 					// Soft-lock diagnostic: track the ball's bounding box while it's
@@ -538,9 +585,19 @@ func main() {
 					state = ballState{X: ball.X, Y: ball.Y, Resting: ball.Resting}
 				}
 			}
-			msg, _ := json.Marshal(state)
+			// Send a position frame only while the ball moves or when it actually
+			// changed since the last frame; a resting ball whose state is identical
+			// produces nothing (rest = silence).
+			moving := !state.Resting
+			if !haveSent || moving || state.X != lastSentX || state.Y != lastSentY || state.Resting != lastSentResting {
+				emit(stateMsg{Type: "state", X: state.X, Y: state.Y, Resting: state.Resting})
+				lastSentX, lastSentY, lastSentResting = state.X, state.Y, state.Resting
+				haveSent = true
+			}
 			ballMu.Unlock()
-			h.broadcast(msg)
+			for _, b := range toSend {
+				h.broadcast(b)
+			}
 		}
 	}()
 
@@ -552,6 +609,14 @@ func main() {
 		}
 		h.add(conn)
 		log.Println("client connected:", conn.RemoteAddr())
+		// The loop is silent while the ball rests, so a fresh client wouldn't learn
+		// where the ball is. Send it the current position immediately.
+		ballMu.Lock()
+		snap := stateMsg{Type: "state", X: ball.X, Y: ball.Y, Resting: ball.Resting}
+		ballMu.Unlock()
+		if b, err := json.Marshal(snap); err == nil {
+			conn.WriteMessage(websocket.TextMessage, b)
+		}
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -566,6 +631,8 @@ func main() {
 			switch msg.Type {
 			case "shoot":
 				ballMu.Lock()
+				fired := false
+				var fvx, fvy, fx, fy float64
 				if inHoleTicks == 0 && inWaterTicks == 0 {
 					penaltyFrozen = false
 					vx, vy := msg.VX, msg.VY
@@ -583,8 +650,13 @@ func main() {
 						vy *= mult
 					}
 					ball.Shoot(vx, vy)
+					fired = true
+					fvx, fvy, fx, fy = vx, vy, ball.X, ball.Y
 				}
 				ballMu.Unlock()
+				if fired {
+					h.broadcastJSON(eventMsg{Type: "event", Event: "shotFired", X: fx, Y: fy, VX: fvx, VY: fvy})
+				}
 			case "course":
 				// Live preview push from the editor: the full (possibly unsaved)
 				// course plus which hole to show. Normalized (defaults filled) but
@@ -594,7 +666,9 @@ func main() {
 					c = coursestore.Normalize(c)
 					ballMu.Lock()
 					setActive(c, msg.Hole)
+					rx, ry := ball.X, ball.Y
 					ballMu.Unlock()
+					h.broadcastJSON(eventMsg{Type: "event", Event: "reset", X: rx, Y: ry})
 					log.Printf("course preview: id=%q holes=%d activeHole=%d", c.ID, len(c.Holes), msg.Hole)
 				}
 			case "selectHole":
@@ -602,7 +676,9 @@ func main() {
 				// geometry (used for hole navigation).
 				ballMu.Lock()
 				setActive(activeCourse, msg.Hole)
+				rx, ry := ball.X, ball.Y
 				ballMu.Unlock()
+				h.broadcastJSON(eventMsg{Type: "event", Event: "reset", X: rx, Y: ry})
 			case "reset":
 				ballMu.Lock()
 				inHoleTicks = 0
@@ -616,10 +692,13 @@ func main() {
 				}
 				ball = physics.NewBall(teeX, cty(teeX)-teeH-10, 10)
 				lastNonWaterX = teeX
+				rx, ry := ball.X, ball.Y
 				log.Printf("reset to tee=%s (x=%.0f)", msg.Tee, teeX)
 				ballMu.Unlock()
+				h.broadcastJSON(eventMsg{Type: "event", Event: "reset", X: rx, Y: ry})
 			case "skipTimer":
 				ballMu.Lock()
+				var skipReset *eventMsg
 				if sinkTicks > 0 {
 					ball.X, ball.Y = penaltyX, penaltyY
 					ball.VX, ball.VY = 0, 0
@@ -634,11 +713,19 @@ func main() {
 					inWaterTicks = 0
 					penaltyFrozen = true
 				} else if inHoleTicks > 0 {
+					// Re-tee instead of just zeroing the timer: the ball is still sitting
+					// below the green, so dropping straight back to physics would re-sink
+					// it (and re-fire the sank event) every tick.
 					inHoleTicks = 0
+					ball = physics.NewBall(hole.TeeBackX, startY(), 10)
+					skipReset = &eventMsg{Type: "event", Event: "reset", X: ball.X, Y: ball.Y}
 				} else {
 					penaltyFrozen = false
 				}
 				ballMu.Unlock()
+				if skipReset != nil {
+					h.broadcastJSON(*skipReset)
+				}
 			}
 		}
 	})
@@ -706,6 +793,171 @@ func main() {
 			writeJSON(w, saved)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// ---- Rooms API (in-memory, ephemeral) ----
+	// Online lobby rooms. Unlike courses these aren't persisted — the manager holds
+	// them in memory so every client sees the same live list. The room browser
+	// reads the list over HTTP; create/join and all lobby actions go over the
+	// /lobby WebSocket (below), which is where per-client identity + membership live.
+	roomMgr := rooms.NewManager()
+
+	// GET /rooms — list open rooms (newest first) for the room browser.
+	http.HandleFunc("/rooms", func(w http.ResponseWriter, r *http.Request) {
+		cors(w)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, roomMgr.List())
+	})
+
+	// ---- Lobby WebSocket ----
+	// A separate socket from the game /ws: each connection is an identified lobby
+	// player. Handles create/join/leave and all in-room actions (name, color,
+	// ready, chat, host course/victory selection, start), broadcasting the room
+	// snapshot to members after each change.
+	var nextPlayerID int64
+	http.HandleFunc("/lobby", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Println("lobby upgrade:", err)
+			return
+		}
+		defer conn.Close()
+
+		pid := int(atomic.AddInt64(&nextPlayerID, 1))
+		player := &rooms.Player{ID: pid, Name: fmt.Sprintf("Player %d", pid), Send: make(chan []byte, 64)}
+
+		// Writer goroutine drains the player's outbound queue to the socket.
+		go func() {
+			for msg := range player.Send {
+				if conn.WriteMessage(websocket.TextMessage, msg) != nil {
+					return
+				}
+			}
+		}()
+
+		// On disconnect: drop from the room (broadcast to whoever remains), then
+		// close the send channel so the writer goroutine exits.
+		defer func() {
+			if roomID, ok := roomMgr.Leave(pid); ok {
+				roomMgr.BroadcastState(roomID)
+			}
+			close(player.Send)
+		}()
+
+		send := func(v any) {
+			if b, err := json.Marshal(v); err == nil {
+				player.Send <- b
+			}
+		}
+		sendErr := func(e error) { send(map[string]any{"type": "room:error", "msg": e.Error()}) }
+
+		send(map[string]any{"type": "hello", "playerId": pid})
+		log.Println("lobby client connected:", pid)
+
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				log.Println("lobby client disconnected:", pid)
+				return
+			}
+			var msg struct {
+				Type     string  `json:"type"`
+				Name     string  `json:"name"`
+				RoomID   string  `json:"roomId"`
+				Color    string  `json:"color"`
+				Ready    bool    `json:"ready"`
+				Text     string  `json:"text"`
+				CourseID string  `json:"courseId"`
+				Victory  string  `json:"victory"`
+				VX       float64 `json:"vx"`
+				VY       float64 `json:"vy"`
+			}
+			if json.Unmarshal(data, &msg) != nil {
+				continue
+			}
+
+			switch msg.Type {
+			case "roomCreate":
+				roomID := roomMgr.CreateAndJoin(player, msg.Name)
+				log.Printf("room created: id=%q by player=%d", roomID, pid)
+				send(map[string]any{"type": "room:joined", "roomId": roomID})
+				roomMgr.BroadcastState(roomID)
+			case "roomJoin":
+				if err := roomMgr.Join(player, msg.RoomID); err != nil {
+					sendErr(err)
+					break
+				}
+				send(map[string]any{"type": "room:joined", "roomId": msg.RoomID})
+				roomMgr.BroadcastState(msg.RoomID)
+			case "roomLeave":
+				if roomID, ok := roomMgr.Leave(pid); ok {
+					roomMgr.BroadcastState(roomID)
+				}
+				send(map[string]any{"type": "room:left"})
+			case "setName":
+				if roomID, ok := roomMgr.SetName(pid, msg.Name); ok {
+					roomMgr.BroadcastState(roomID)
+				}
+			case "setColor":
+				if roomID, err := roomMgr.SetColor(pid, msg.Color); err != nil {
+					sendErr(err)
+				} else {
+					roomMgr.BroadcastState(roomID)
+				}
+			case "setReady":
+				if roomID, ok := roomMgr.SetReady(pid, msg.Ready); ok {
+					roomMgr.BroadcastState(roomID)
+				}
+			case "setCourse":
+				if roomID, err := roomMgr.SetCourse(pid, msg.CourseID); err != nil {
+					sendErr(err)
+				} else {
+					roomMgr.BroadcastState(roomID)
+				}
+			case "setVictory":
+				if roomID, err := roomMgr.SetVictory(pid, msg.Victory); err != nil {
+					sendErr(err)
+				} else {
+					roomMgr.BroadcastState(roomID)
+				}
+			case "chat":
+				text := strings.TrimSpace(msg.Text)
+				if text == "" {
+					break
+				}
+				if len(text) > 240 {
+					text = text[:240]
+				}
+				if roomID, ok := roomMgr.RoomOf(pid); ok {
+					if b, err := json.Marshal(map[string]any{"type": "chat", "name": roomMgr.PlayerName(pid), "text": text}); err == nil {
+						roomMgr.Broadcast(roomID, b)
+					}
+				}
+			case "start":
+				if roomID, err := roomMgr.Start(pid); err != nil {
+					sendErr(err)
+				} else {
+					// Load the host-selected course (fall back to the default), then
+					// spin up the per-room match — it broadcasts match:hole/match:state,
+					// which is what moves clients onto the match screen.
+					holes := coursestore.DefaultCourse().Holes
+					if c, ok := store.Get(roomMgr.RoomCourse(roomID)); ok && len(c.Holes) > 0 {
+						holes = c.Holes
+					}
+					roomMgr.BeginMatch(roomID, holes)
+				}
+			case "shoot":
+				roomMgr.MatchShoot(pid, msg.VX, msg.VY)
+			case "matchReturn":
+				roomMgr.MatchReturn(pid)
+			}
 		}
 	})
 

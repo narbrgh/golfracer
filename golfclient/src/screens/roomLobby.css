@@ -1,0 +1,252 @@
+.room-lobby {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px 20px;
+  background: var(--cream);
+}
+
+.lobby-shell {
+  position: relative;
+  width: 100%;
+  max-width: 880px;
+  background: #fbf7e4;
+  border: 1px solid rgba(36, 64, 90, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(36, 64, 90, 0.18);
+  overflow: hidden;
+  padding: 22px 26px 26px;
+}
+
+/* Decorative green/blue stripe band across the top — the beer-can sea stripes. */
+.lobby-stripes {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 8px;
+  background: linear-gradient(
+    90deg,
+    var(--sea-1) 0 25%,
+    var(--sea-2) 25% 50%,
+    var(--sea-3) 50% 75%,
+    var(--sea-4) 75% 100%
+  );
+}
+
+.lobby-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 6px 0 18px;
+}
+.lobby-title {
+  margin: 0;
+  font-size: 30px;
+  color: var(--ink);
+}
+.lobby-leave {
+  padding: 8px 14px;
+  border: 1px solid rgba(36, 64, 90, 0.28);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.lobby-leave:hover { background: rgba(36, 64, 90, 0.07); }
+
+.lobby-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 22px;
+}
+.lobby-col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.lobby-section { min-width: 0; }
+.lobby-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #7c8a80;
+  margin-bottom: 8px;
+}
+.lobby-empty {
+  padding: 12px;
+  color: #97a39a;
+  font-style: italic;
+  font-size: 14px;
+}
+
+/* ---- Ball colors ---- */
+.color-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.swatch {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 2px solid rgba(36, 64, 90, 0.2);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+.swatch:hover { transform: scale(1.08); }
+.swatch.selected {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 3px rgba(36, 64, 90, 0.18);
+}
+.swatch.taken {
+  opacity: 0.35;
+  cursor: default;
+}
+.swatch.taken:hover { transform: none; }
+
+/* ---- Course list ---- */
+.course-list { display: flex; flex-direction: column; gap: 8px; max-height: 168px; overflow-y: auto; }
+.course-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 9px;
+  border: 1px solid rgba(51, 168, 156, 0.28);
+  background: rgba(51, 168, 156, 0.1);
+  color: var(--ink);
+  font-size: 15px;
+  cursor: pointer;
+  text-align: left;
+}
+.course-item:hover:not(:disabled) { background: rgba(51, 168, 156, 0.2); }
+.course-item.selected {
+  border-color: var(--sea-1);
+  background: rgba(51, 168, 156, 0.28);
+  font-weight: 700;
+}
+.course-item:disabled { cursor: default; }
+.course-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.course-holes { font-size: 12px; color: #7c8a80; flex: 0 0 auto; }
+
+/* ---- Chips (victory, name/chat buttons) ---- */
+.chip-row { display: flex; gap: 10px; }
+.chip {
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(36, 64, 90, 0.25);
+  background: #fff;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chip:hover:not(:disabled) { background: rgba(36, 64, 90, 0.06); }
+.chip.selected {
+  background: var(--sea-3);
+  border-color: var(--sea-3);
+  color: var(--cream);
+}
+.chip:disabled { opacity: 0.55; cursor: default; }
+
+/* ---- Players ---- */
+.players-list { display: flex; flex-direction: column; gap: 8px; }
+.player-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: rgba(36, 64, 90, 0.05);
+  border: 1px solid rgba(36, 64, 90, 0.1);
+}
+.player-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(36, 64, 90, 0.3);
+  flex: 0 0 auto;
+}
+.player-name { flex: 1; min-width: 0; color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-badge {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: var(--sun-4);
+  border: 1px solid var(--sun-4);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.player-ready { font-size: 13px; color: #97a39a; flex: 0 0 auto; }
+.player-ready.is-ready { color: var(--sea-1); font-weight: 700; }
+
+/* ---- Name + chat ---- */
+.name-row { display: flex; align-items: center; gap: 8px; }
+.name-display {
+  flex: 1;
+  min-width: 0;
+  font-weight: 700;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lobby-input {
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(36, 64, 90, 0.28);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 14px;
+  outline: none;
+}
+.lobby-input:focus { border-color: var(--sea-3); }
+.name-row .lobby-input { flex: 0 1 130px; }
+
+.chat-section { display: flex; flex-direction: column; gap: 8px; }
+.chat-log {
+  height: 150px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: #fffdf5;
+  border: 1px solid rgba(36, 64, 90, 0.16);
+  font-size: 14px;
+  color: var(--ink);
+}
+.chat-line { margin-bottom: 4px; word-break: break-word; }
+.chat-who { font-weight: 700; color: var(--sea-3); }
+.chat-row { display: flex; gap: 8px; }
+.chat-row .lobby-input { flex: 1; }
+
+/* ---- Ready / Start ---- */
+.lobby-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+.ready-btn,
+.start-btn {
+  padding: 12px 28px;
+  border: none;
+  border-radius: 10px;
+  color: var(--cream);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(36, 64, 90, 0.18);
+  transition: filter 0.12s ease;
+}
+.ready-btn { background: var(--sea-1); }
+.ready-btn.selected { background: var(--sun-4); }
+.start-btn { background: var(--sea-3); }
+.ready-btn:hover,
+.start-btn:hover:not(:disabled) { filter: brightness(1.07); }
+.start-btn:disabled { opacity: 0.45; cursor: default; box-shadow: none; }

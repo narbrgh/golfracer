@@ -26,7 +26,11 @@
       "Bash(node -e ' *)",
       "Bash(xargs -r kill -9)",
       "Bash(nohup go run .)",
-      "Bash(qlmanage -t -s 1000 -o /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/463f5b0e-0365-4242-84d8-203b497a851c/scratchpad /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/463f5b0e-0365-4242-84d8-203b497a851c/scratchpad/hero2.svg)"
+      "Bash(qlmanage -t -s 1000 -o /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/463f5b0e-0365-4242-84d8-203b497a851c/scratchpad /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/463f5b0e-0365-4242-84d8-203b497a851c/scratchpad/hero2.svg)",
+      "Skill(fewer-permission-prompts)",
+      "Skill(fewer-permission-prompts:*)",
+      "Bash(npm run *)",
+      "Bash(go vet *)"
     ]
   }
 }

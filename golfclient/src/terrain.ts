@@ -55,6 +55,28 @@ export interface SplineCoeff {
 
 // Catmull-Rom spline. Phantom endpoints are reflected so the curve passes
 // through the first and last control points without clamping.
+// Neutral Base-Y reference for spline terrain. Splines are authored as absolute
+// control-point Y values; treating BaseGround as an offset from this reference lets
+// the Base Y slider raise/lower the whole spline (and spline+wave) terrain, just
+// like it already does for waves. Equal to the default hole's baseGround so
+// existing courses at the default render identically. Must match the server
+// (terrain.SplineBaseRef in golfserver/terrain/terrain.go).
+export const SPLINE_BASE_REF = 650
+
+// Vertical offset that Base Y applies to all authored-absolute geometry — spline
+// control points, bunker rims, and water level — so they shift together with the
+// terrain when the Base Y slider moves. (Wave terrain already bakes in baseGround.)
+export function baseOffset(h: { baseGround: number }): number {
+  return h.baseGround - SPLINE_BASE_REF
+}
+
+// Bunker rim spline coefficients, shifted by the hole's Base-Y offset so the sand
+// rim tracks the terrain. Used by every renderer + the physics build.
+export function bunkerRimCoeffs(h: { baseGround: number }, topEdge: ControlPoint[]): SplineCoeff[] {
+  const off = baseOffset(h)
+  return buildSpline(topEdge.map((p) => ({ x: p.x, y: p.y + off })))
+}
+
 export function buildSpline(pts: ControlPoint[]): SplineCoeff[] {
   if (pts.length < 2) return []
   const p = [...pts].sort((a, b) => a.x - b.x)
@@ -333,5 +355,7 @@ export const DEFAULT_HOLE: Hole = {
   ],
   bunkers: [],
   platforms: [],
-  theme: DEFAULT_THEME,
+  // Own copy, not the shared DEFAULT_THEME reference — otherwise a hole that ends
+  // up aliasing this object could mutate the global default in place.
+  theme: { ...DEFAULT_THEME },
 }

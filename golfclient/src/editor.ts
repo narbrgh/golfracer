@@ -1,5 +1,5 @@
 import type { Course, Hole, TerrainSegment, TerrainWave, CourseTheme, ControlPoint, Hazard, Platform, Pt, Bunker } from './terrain'
-import { buildSegments, terrainY, DEFAULT_HOLE, buildSpline, splineY, hexWithAlpha, waterPoolBounds, pointInPoly } from './terrain'
+import { buildSegments, terrainY, DEFAULT_HOLE, buildSpline, splineY, hexWithAlpha, waterPoolBounds, pointInPoly, SPLINE_BASE_REF, bunkerRimCoeffs } from './terrain'
 import { listCourses, getCourse, saveCourse, newHole, newCourse } from './courseapi'
 import './editor.css'
 
@@ -87,16 +87,18 @@ export function initEditor(opts: {
   controlsCard.innerHTML = `
     <div style="font-size:15px;font-weight:bold;color:#eee;margin-bottom:14px">Controls — Game View</div>
     <table style="border-collapse:collapse;width:100%">
-      <tr><td style="padding:4px 16px 4px 0;color:#7af">Click</td><td>Add spline control point</td></tr>
-      <tr><td style="padding:4px 16px 4px 0;color:#7af">Drag point</td><td>Move control point</td></tr>
-      <tr><td style="padding:4px 16px 4px 0;color:#7af">Double-click point</td><td>Delete control point</td></tr>
+      <tr><td style="padding:4px 16px 4px 0;color:#7af">Click terrain</td><td>Add spline point (terrain must be selected)</td></tr>
+      <tr><td style="padding:4px 16px 4px 0;color:#7af">Click bunker</td><td>Select it; then click near it to add rim points</td></tr>
+      <tr><td style="padding:4px 16px 4px 0;color:#7af">Esc</td><td>Deselect → back to editing terrain</td></tr>
+      <tr><td style="padding:4px 16px 4px 0;color:#7af">Drag point</td><td>Move control / rim point</td></tr>
+      <tr><td style="padding:4px 16px 4px 0;color:#7af">Double-click point</td><td>Delete it</td></tr>
       <tr><td style="padding:4px 16px 4px 0;color:#7af">Space + drag</td><td>Pan camera</td></tr>
       <tr><td style="padding:4px 16px 4px 0;color:#7af">Scroll wheel</td><td>Zoom</td></tr>
       <tr><td style="padding:4px 16px 4px 0;color:#7af">Minimap drag</td><td>Jump camera to position</td></tr>
     </table>
     <div style="font-size:15px;font-weight:bold;color:#eee;margin:16px 0 14px">Controls — Global View</div>
     <table style="border-collapse:collapse;width:100%">
-      <tr><td style="padding:4px 16px 4px 0;color:#7af">Click</td><td>Add spline control point</td></tr>
+      <tr><td style="padding:4px 16px 4px 0;color:#7af">Click terrain</td><td>Add spline point (terrain must be selected)</td></tr>
       <tr><td style="padding:4px 16px 4px 0;color:#7af">Drag point</td><td>Move control point</td></tr>
       <tr><td style="padding:4px 16px 4px 0;color:#7af">Double-click point</td><td>Delete control point</td></tr>
     </table>
@@ -225,6 +227,13 @@ export function initEditor(opts: {
   }
   refHole()
 
+  // Base-Y offset applied to authored-absolute geometry (spline control points,
+  // bunker rims, water level). dispPt: stored → on-screen world; storeY: clicked
+  // world → stored. Defined early because rebuildWaterPools() (below) uses it.
+  const baseOff = () => hole.baseGround - SPLINE_BASE_REF
+  const dispPt  = (p: Pt): Pt => ({ x: p.x, y: p.y + baseOff() })
+  const storeY  = (worldY: number): number => worldY - baseOff()
+
   // slugify turns a course name into a filename-safe id (matches the server's
   // ValidID: letters, digits, underscore, hyphen).
   function slugify(s: string): string {
@@ -254,7 +263,7 @@ export function initEditor(opts: {
     courseFile = prev
     refHole()
     lastEmittedCourse = structuredClone(prev)
-    selectedPlatIdx = null
+    selectTerrain()
     opts.onCourseChange(structuredClone(courseFile), activeHole)
     rebuild()
     syncUndoRedoBtns()
@@ -267,7 +276,7 @@ export function initEditor(opts: {
     courseFile = next
     refHole()
     lastEmittedCourse = structuredClone(next)
-    selectedPlatIdx = null
+    selectTerrain()
     opts.onCourseChange(structuredClone(courseFile), activeHole)
     rebuild()
     syncUndoRedoBtns()
@@ -290,11 +299,13 @@ export function initEditor(opts: {
     const spCoeffs = buildSpline(hole.controlPoints)
     const ptY = makePtY(segs, spCoeffs)
     waterPools = []
+    const off = baseOff()
     for (const hz of hole.hazards) {
       if (hz.kind !== 'water' || hz.level == null) continue
-      const bounds = waterPoolBounds(hz.cx, hz.level, ptY, hole.worldW)
+      const wl = hz.level + off
+      const bounds = waterPoolBounds(hz.cx, wl, ptY, hole.worldW)
       if (!bounds) continue
-      waterPools.push({ left: bounds.left, right: bounds.right, level: hz.level })
+      waterPools.push({ left: bounds.left, right: bounds.right, level: wl })
     }
   }
   rebuildWaterPools()
@@ -324,6 +335,15 @@ export function initEditor(opts: {
   let platDragOriginMouse: Pt = { x: 0, y: 0 }
   let platDragOriginPts: Pt[] = []   // snapshot of all vertices at drag start
 
+  // ---- selection model ----
+  // Exactly one of {terrain, a bunker, a platform} is "selected". Spline control
+  // points are only editable when the terrain is selected, so clicks while editing
+  // a bunker don't accidentally add/move terrain points.
+  let terrainSelected = true
+  function selectTerrain()          { terrainSelected = true;  selectedBunkerIdx = null; selectedPlatIdx = null }
+  function selectBunker(i: number)  { terrainSelected = false; selectedBunkerIdx = i;    selectedPlatIdx = null }
+  function selectPlatform(i: number){ terrainSelected = false; selectedPlatIdx = i;      selectedBunkerIdx = null }
+
   // Space = temporary pan tool (same convention as Figma/Illustrator/Inkscape).
   // Only active while the editor overlay is visible.
   window.addEventListener('keydown', (e) => {
@@ -338,6 +358,10 @@ export function initEditor(opts: {
     }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
       e.preventDefault(); doRedo()
+    }
+    // Escape → deselect back to the terrain (so spline points become editable).
+    if (e.key === 'Escape' && !terrainSelected) {
+      e.preventDefault(); selectTerrain(); rebuild()
     }
     // Arrow keys move the selected platform. Ignore if an input has focus so
     // sliders and number boxes still work normally.
@@ -399,7 +423,7 @@ export function initEditor(opts: {
       const b = hole.bunkers[bi]
       if (b.topEdge.length < 2) continue
       const sel    = bi === selectedBunkerIdx
-      const coeffs = buildSpline(b.topEdge)
+      const coeffs = bunkerRimCoeffs(hole, b.topEdge)
       const leftX  = Math.min(...b.topEdge.map(p => p.x))
       const rightX = Math.max(...b.topEdge.map(p => p.x))
       // Fill: spline rim → worldH (terrain drawn after clips the underground part)
@@ -432,12 +456,12 @@ export function initEditor(opts: {
     // Edge midpoints (open polyline → n-1 midpoints)
     ctx.fillStyle = 'rgba(160,160,220,0.7)'; ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1
     for (let i = 0; i < pts.length - 1; i++) {
-      const a = toScreen(pts[i]), bb = toScreen(pts[i + 1])
+      const a = toScreen(dispPt(pts[i])), bb = toScreen(dispPt(pts[i + 1]))
       ctx.beginPath(); ctx.arc((a.sx+bb.sx)/2, (a.sy+bb.sy)/2, MID_R, 0, Math.PI*2); ctx.fill(); ctx.stroke()
     }
     // Vertices (orange to distinguish from platform blue)
     for (let i = 0; i < pts.length; i++) {
-      const { sx, sy } = toScreen(pts[i])
+      const { sx, sy } = toScreen(dispPt(pts[i]))
       ctx.fillStyle = i === bunkerVertDragIdx ? '#fff' : '#fa8'
       ctx.beginPath(); ctx.arc(sx, sy, VERT_R, 0, Math.PI*2); ctx.fill()
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
@@ -448,18 +472,8 @@ export function initEditor(opts: {
     if (selectedBunkerIdx === null) return -1
     const pts = hole.bunkers[selectedBunkerIdx]?.topEdge ?? []
     for (let i = 0; i < pts.length; i++) {
-      const { sx, sy } = toScreen(pts[i])
+      const { sx, sy } = toScreen(dispPt(pts[i]))
       if (Math.hypot(cx-sx, cy-sy) <= VERT_R + 2) return i
-    }
-    return -1
-  }
-
-  function hitTestBunkerEdgeMid(cx: number, cy: number, toScreen: (p: Pt) => { sx: number; sy: number }): number {
-    if (selectedBunkerIdx === null) return -1
-    const pts = hole.bunkers[selectedBunkerIdx]?.topEdge ?? []
-    for (let i = 0; i < pts.length - 1; i++) {
-      const a = toScreen(pts[i]), bb = toScreen(pts[i + 1])
-      if (Math.hypot(cx-(a.sx+bb.sx)/2, cy-(a.sy+bb.sy)/2) <= MID_R + 3) return i
     }
     return -1
   }
@@ -473,7 +487,7 @@ export function initEditor(opts: {
       const leftX  = Math.min(...b.topEdge.map(p => p.x))
       const rightX = Math.max(...b.topEdge.map(p => p.x))
       if (wx < leftX || wx > rightX) continue
-      const coeffs = buildSpline(b.topEdge)
+      const coeffs = bunkerRimCoeffs(hole, b.topEdge)
       const topY   = splineY(wx, coeffs)
       const groundY = ptY(wx)
       // rim above terrain = topY < groundY (screen Y, increases downward)
@@ -485,11 +499,13 @@ export function initEditor(opts: {
   // Make a 3-point arc default bunker top edge centered at (cx, cy) in world coords.
   function makeDefaultBunker(cx: number, ptY: (x:number)=>number): Pt[] {
     const hw = 150
+    // ptY is display-space (includes Base-Y offset); store rim points without it.
+    const off = baseOff()
     const groundL = ptY(cx - hw), groundC = ptY(cx), groundR = ptY(cx + hw)
     return [
-      { x: cx - hw, y: groundL - 30 },
-      { x: cx,      y: Math.min(groundC, groundL, groundR) - 60 },
-      { x: cx + hw, y: groundR - 30 },
+      { x: cx - hw, y: groundL - 30 - off },
+      { x: cx,      y: Math.min(groundC, groundL, groundR) - 60 - off },
+      { x: cx + hw, y: groundR - 30 - off },
     ]
   }
 
@@ -644,7 +660,7 @@ export function initEditor(opts: {
 
   function sliderRow(
     label: string, value: number, min: number, max: number, step: number,
-    onChange: (v: number) => void, fmt?: (v: number) => string,
+    onChange: (v: number) => void, fmt?: (v: number) => string, onCommit?: () => void,
   ): HTMLElement {
     const row = document.createElement('div'); row.className = 'slider-row'
     const lbl = document.createElement('span'); lbl.className = 'slider-label'; lbl.textContent = label
@@ -654,9 +670,12 @@ export function initEditor(opts: {
     const num = document.createElement('input'); num.type = 'number'; num.className = 'slider-num'
     num.min = String(min); num.max = String(max); num.step = String(step); num.value = numFmt(value)
     slider.addEventListener('input', () => { const v = parseFloat(slider.value); num.value = numFmt(v); onChange(v) })
+    // onCommit fires once on release (not every drag tick) — used to refresh other
+    // sliders whose range depends on this value (e.g. Hole X's max = world width).
+    slider.addEventListener('change', () => onCommit?.())
     num.addEventListener('change', () => {
       const v = Math.max(min, Math.min(max, parseFloat(num.value) || 0))
-      slider.value = String(v); num.value = numFmt(v); onChange(v)
+      slider.value = String(v); num.value = numFmt(v); onChange(v); onCommit?.()
     })
     row.append(lbl, slider, num)
     return row
@@ -708,8 +727,8 @@ export function initEditor(opts: {
   function makePtY(segs: ReturnType<typeof buildSegments>, spCoeffs: ReturnType<typeof buildSpline>) {
     return (x: number): number => {
       const s = hole.useSpline, w = hole.useWaves
-      if (s && w) return splineY(x, spCoeffs) + terrainY(x, segs) - hole.baseGround
-      if (s)      return splineY(x, spCoeffs)
+      if (s && w) return splineY(x, spCoeffs) + terrainY(x, segs) - SPLINE_BASE_REF
+      if (s)      return splineY(x, spCoeffs) + hole.baseGround - SPLINE_BASE_REF
       if (w)      return terrainY(x, segs)
       return hole.baseGround
     }
@@ -859,11 +878,11 @@ export function initEditor(opts: {
     ctx.beginPath(); ctx.moveTo(tx(0), ty(hole.baseGround)); ctx.lineTo(tx(hole.worldW), ty(hole.baseGround))
     ctx.stroke(); ctx.setLineDash([])
 
-    // control points
-    if (hole.useSpline) {
+    // control points (only when the terrain is the selected element)
+    if (hole.useSpline && terrainSelected) {
       for (let i = 0; i < hole.controlPoints.length; i++) {
         const pt = hole.controlPoints[i]
-        ctx.beginPath(); ctx.arc(tx(pt.x), ty(pt.y), 5, 0, Math.PI * 2)
+        ctx.beginPath(); ctx.arc(tx(pt.x), ty(pt.y + baseOff()), 5, 0, Math.PI * 2)
         ctx.fillStyle = dragIdx === i ? '#fff' : '#4af'; ctx.fill()
         ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke()
       }
@@ -973,16 +992,18 @@ export function initEditor(opts: {
 
     // spline curve + control points
     if (hole.useSpline) {
+      const off = baseOff()
       ctx.beginPath()
       for (let x = 0; x <= hole.worldW; x += 8) {
-        const y = splineY(x, spCoeffs)
+        const y = splineY(x, spCoeffs) + off
         x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
       }
       ctx.strokeStyle = 'rgba(80,160,255,0.40)'; ctx.lineWidth = 1/gvZoom
       ctx.setLineDash([4/gvZoom, 3/gvZoom]); ctx.stroke(); ctx.setLineDash([])
-      for (let i = 0; i < hole.controlPoints.length; i++) {
+      // Control-point handles only when the terrain is the selected element.
+      if (terrainSelected) for (let i = 0; i < hole.controlPoints.length; i++) {
         const pt = hole.controlPoints[i]
-        ctx.beginPath(); ctx.arc(pt.x, pt.y, 6/gvZoom, 0, Math.PI*2)
+        ctx.beginPath(); ctx.arc(pt.x, pt.y + off, 6/gvZoom, 0, Math.PI*2)
         ctx.fillStyle = dragIdx === i ? '#fff' : '#4af'; ctx.fill()
         ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5/gvZoom; ctx.stroke()
       }
@@ -1034,64 +1055,52 @@ export function initEditor(opts: {
     const _spCoeff = buildSpline(hole.controlPoints)
     const _ptY     = makePtY(_segs, _spCoeff)
 
-    // ---- bunker interactions ----
-    // 1. Vertex handle of selected bunker?
-    const bvIdx = hitTestBunkerVertex(cx, cy, toScreen)
-    if (bvIdx !== -1) { bunkerVertDragIdx = bvIdx; return }
-    // 2. Edge midpoint of selected bunker? → insert a point.
-    const beIdx = hitTestBunkerEdgeMid(cx, cy, toScreen)
-    if (beIdx !== -1) {
-      const w = screenToWorld(cx, cy)
-      hole.bunkers[selectedBunkerIdx!].topEdge.splice(beIdx + 1, 0, { x: w.x, y: w.y })
-      hole.bunkers[selectedBunkerIdx!].topEdge.sort((a, b) => a.x - b.x)
-      emit(); drawPreview(); return
-    }
-    // 3. Inside fill of selected bunker? → body drag.
+    // ---- bunker interactions (a selected bunker captures all nearby clicks) ----
     if (selectedBunkerIdx !== null) {
+      const bvIdx = hitTestBunkerVertex(cx, cy, toScreen)
+      if (bvIdx !== -1) { bunkerVertDragIdx = bvIdx; return }
       const w = screenToWorld(cx, cy)
-      if (hitTestBunkerBody(w.x, w.y, _ptY) === -1) { // body of THIS bunker
-        const b = hole.bunkers[selectedBunkerIdx]
-        const leftX = Math.min(...b.topEdge.map(p => p.x))
-        const rightX = Math.max(...b.topEdge.map(p => p.x))
-        if (w.x >= leftX && w.x <= rightX) {
-          const coeffs = buildSpline(b.topEdge)
-          const topY = splineY(w.x, coeffs)
-          if (w.y >= _ptY(w.x) && w.y <= topY) {
-            bunkerBodyDragging = true
-            bunkerDragOriginMouse = w
-            bunkerDragOriginPts = b.topEdge.map(p => ({ ...p }))
-            return
-          }
-        }
+      // Click a different bunker → select it.
+      const otherBi = hitTestBunkerBody(w.x, w.y, _ptY)
+      if (otherBi !== -1) { selectBunker(otherBi); rebuild(); return }
+      const b = hole.bunkers[selectedBunkerIdx]
+      const leftX = Math.min(...b.topEdge.map(p => p.x))
+      const rightX = Math.max(...b.topEdge.map(p => p.x))
+      const topY = splineY(w.x, bunkerRimCoeffs(hole, b.topEdge))
+      // Inside the sand (between rim and ground) → drag the whole bunker.
+      if (w.x >= leftX && w.x <= rightX && w.y >= topY && w.y <= _ptY(w.x)) {
+        bunkerBodyDragging = true
+        bunkerDragOriginMouse = w
+        bunkerDragOriginPts = b.topEdge.map(p => ({ ...p }))
+        return
       }
+      // Near the bunker → add a rim point (click anywhere close to shape/extend it).
+      if (w.x >= leftX - 140 && w.x <= rightX + 140) {
+        b.topEdge.push({ x: w.x, y: storeY(w.y) })
+        b.topEdge.sort((a, c) => a.x - c.x)
+        emit(); drawPreview(); return
+      }
+      // Clicked far away → leave the bunker (back to editing terrain).
+      selectTerrain(); rebuild(); return
     }
-    // 4. Click on a different unselected bunker? → select it.
-    const wBunker = screenToWorld(cx, cy)
-    const hitBi = hitTestBunkerBody(wBunker.x, wBunker.y, _ptY)
-    if (hitBi !== -1) {
-      selectedBunkerIdx = hitBi; selectedPlatIdx = null; rebuild(); return
-    }
-    // 5. Deselect bunker if one was selected.
-    if (selectedBunkerIdx !== null) {
-      selectedBunkerIdx = null; rebuild(); return
+    // No bunker selected: clicking a bunker selects it.
+    {
+      const w = screenToWorld(cx, cy)
+      const hitBi = hitTestBunkerBody(w.x, w.y, _ptY)
+      if (hitBi !== -1) { selectBunker(hitBi); rebuild(); return }
     }
 
     // ---- platform interactions ----
-    // 1. Vertex handle of selected platform?
-    const vIdx = hitTestVertex(cx, cy, toScreen)
-    if (vIdx !== -1) {
-      platVertDragIdx = vIdx; return
-    }
-    // 2. Edge midpoint of selected platform? → insert a vertex.
-    const eIdx = hitTestEdgeMid(cx, cy, toScreen)
-    if (eIdx !== -1) {
-      const plat = hole.platforms[selectedPlatIdx!]
-      const { x: wx, y: wy } = screenToWorld(cx, cy)
-      plat.points.splice(eIdx + 1, 0, { x: wx, y: wy })
-      emit(); drawPreview(); return
-    }
-    // 3. Body of selected platform? → body drag.
     if (selectedPlatIdx !== null) {
+      const vIdx = hitTestVertex(cx, cy, toScreen)
+      if (vIdx !== -1) { platVertDragIdx = vIdx; return }
+      const eIdx = hitTestEdgeMid(cx, cy, toScreen)
+      if (eIdx !== -1) {
+        const plat = hole.platforms[selectedPlatIdx]
+        const { x: wx, y: wy } = screenToWorld(cx, cy)
+        plat.points.splice(eIdx + 1, 0, { x: wx, y: wy })
+        emit(); drawPreview(); return
+      }
       const plat = hole.platforms[selectedPlatIdx]
       const w = screenToWorld(cx, cy)
       if (pointInPoly(w.x, w.y, plat.points)) {
@@ -1100,38 +1109,36 @@ export function initEditor(opts: {
         platDragOriginPts = plat.points.map(p => ({ ...p }))
         return
       }
+      const otherPi = hitTestPlatformBody(w.x, w.y)
+      if (otherPi !== -1) { selectPlatform(otherPi); rebuild(); return }
+      selectTerrain(); rebuild(); return
     }
-    // 4. Body of a different platform? → select it.
-    const wc = screenToWorld(cx, cy)
-    const hitPi = hitTestPlatformBody(wc.x, wc.y)
-    if (hitPi !== -1) {
-      selectedPlatIdx = hitPi; rebuild(); return
-    }
-    // 5. Click on empty space → deselect platform, then handle spline editing.
-    if (selectedPlatIdx !== null) {
-      selectedPlatIdx = null; rebuild(); return
+    // No platform selected: clicking a platform selects it.
+    {
+      const w = screenToWorld(cx, cy)
+      const hitPi = hitTestPlatformBody(w.x, w.y)
+      if (hitPi !== -1) { selectPlatform(hitPi); rebuild(); return }
     }
 
-    // ---- spline editing ----
+    // ---- spline editing (only when the terrain is the selected element) ----
+    if (!terrainSelected) return
     if (!hole.useSpline) {
       if (viewMode === 'game') startPan(cx, cy)
       return
     }
     if (viewMode === 'game') {
       const closest = findClosestCp(cx, cy, (pt) => ({
-        sx: (pt.x - gvCamX) * gvZoom, sy: (pt.y - gvCamY) * gvZoom,
+        sx: (pt.x - gvCamX) * gvZoom, sy: (pt.y + baseOff() - gvCamY) * gvZoom,
       }), 10)
       if (closest !== -1) { dragIdx = closest; return }
-      const newPt: ControlPoint = { x: cx / gvZoom + gvCamX, y: cy / gvZoom + gvCamY }
-      hole.controlPoints.push(newPt)
+      hole.controlPoints.push({ x: cx / gvZoom + gvCamX, y: storeY(cy / gvZoom + gvCamY) })
       hole.controlPoints.sort((a, b) => a.x - b.x)
       emit()
     } else {
       const { tx, ty, wx, wy } = globalMetrics()
-      const closest = findClosestCp(cx, cy, (pt) => ({ sx: tx(pt.x), sy: ty(pt.y) }), 10)
+      const closest = findClosestCp(cx, cy, (pt) => ({ sx: tx(pt.x), sy: ty(pt.y + baseOff()) }), 10)
       if (closest !== -1) { dragIdx = closest; return }
-      const newPt: ControlPoint = { x: wx(cx), y: wy(cy) }
-      hole.controlPoints.push(newPt)
+      hole.controlPoints.push({ x: wx(cx), y: storeY(wy(cy)) })
       hole.controlPoints.sort((a, b) => a.x - b.x)
       emit()
     }
@@ -1147,7 +1154,7 @@ export function initEditor(opts: {
     if (bunkerVertDragIdx !== -1 && selectedBunkerIdx !== null) {
       const w = screenToWorld(cx, cy)
       const pts = hole.bunkers[selectedBunkerIdx].topEdge
-      pts[bunkerVertDragIdx] = w
+      pts[bunkerVertDragIdx] = { x: w.x, y: storeY(w.y) }
       pts.sort((a, b) => a.x - b.x)
       emit(); return
     }
@@ -1176,7 +1183,7 @@ export function initEditor(opts: {
     if (viewMode === 'game') {
       if (dragIdx !== -1) {
         hole.controlPoints[dragIdx].x = cx / gvZoom + gvCamX
-        hole.controlPoints[dragIdx].y = cy / gvZoom + gvCamY
+        hole.controlPoints[dragIdx].y = storeY(cy / gvZoom + gvCamY)
         hole.controlPoints.sort((a, b) => a.x - b.x)
         emit()
       } else if (panDragging) {
@@ -1188,19 +1195,19 @@ export function initEditor(opts: {
       previewCanvas.style.cursor = (panDragging || miniDragging) ? 'grabbing'
         : dragIdx !== -1 || platVertDragIdx !== -1 || platBodyDragging ? 'grabbing'
         : spaceHeld ? 'grab'
-        : isNearAnyCp(cx, cy, (pt) => ({ sx: (pt.x-gvCamX)*gvZoom, sy: (pt.y-gvCamY)*gvZoom })) ? 'grab'
+        : terrainSelected && isNearAnyCp(cx, cy, (pt) => ({ sx: (pt.x-gvCamX)*gvZoom, sy: (pt.y+baseOff()-gvCamY)*gvZoom })) ? 'grab'
         : 'crosshair'
     } else {
       if (!hole.useSpline) return
       const { tx, ty, wx, wy } = globalMetrics()
       if (dragIdx !== -1) {
         hole.controlPoints[dragIdx].x = wx(cx)
-        hole.controlPoints[dragIdx].y = wy(cy)
+        hole.controlPoints[dragIdx].y = storeY(wy(cy))
         hole.controlPoints.sort((a, b) => a.x - b.x)
         emit()
       }
       previewCanvas.style.cursor = dragIdx !== -1 ? 'grabbing'
-        : isNearAnyCp(cx, cy, (pt) => ({ sx: tx(pt.x), sy: ty(pt.y) })) ? 'grab'
+        : terrainSelected && isNearAnyCp(cx, cy, (pt) => ({ sx: tx(pt.x), sy: ty(pt.y+baseOff()) })) ? 'grab'
         : 'crosshair'
     }
   })
@@ -1236,11 +1243,11 @@ export function initEditor(opts: {
       }
     }
 
-    // Fall through to spline vertex delete.
-    if (!hole.useSpline || hole.controlPoints.length <= 2) return
+    // Fall through to spline vertex delete (only when editing the terrain).
+    if (!terrainSelected || !hole.useSpline || hole.controlPoints.length <= 2) return
     const toScreenCp = viewMode === 'game'
-      ? (pt: ControlPoint) => ({ sx: (pt.x - gvCamX) * gvZoom, sy: (pt.y - gvCamY) * gvZoom })
-      : (pt: ControlPoint) => { const { tx, ty } = globalMetrics(); return { sx: tx(pt.x), sy: ty(pt.y) } }
+      ? (pt: ControlPoint) => ({ sx: (pt.x - gvCamX) * gvZoom, sy: (pt.y + baseOff() - gvCamY) * gvZoom })
+      : (pt: ControlPoint) => { const { tx, ty } = globalMetrics(); return { sx: tx(pt.x), sy: ty(pt.y + baseOff()) } }
     const idx = findClosestCp(cx, cy, toScreenCp, 12)
     if (idx !== -1) { hole.controlPoints.splice(idx, 1); emit() }
   })
@@ -1282,8 +1289,8 @@ export function initEditor(opts: {
   // ---- build sidebar ----
   function rebuild() {
     rebuildWaterPools() // covers reassigning courseFile wholesale (e.g. show()) without an emit()
-    if (selectedBunkerIdx !== null && selectedBunkerIdx >= hole.bunkers.length) selectedBunkerIdx = null
-    if (selectedPlatIdx   !== null && selectedPlatIdx   >= hole.platforms.length) selectedPlatIdx = null
+    if (selectedBunkerIdx !== null && selectedBunkerIdx >= hole.bunkers.length) selectTerrain()
+    if (selectedPlatIdx   !== null && selectedPlatIdx   >= hole.platforms.length) selectTerrain()
     sidebar.innerHTML = ''
     buildHolesSection()
     buildWorldSection()
@@ -1306,7 +1313,7 @@ export function initEditor(opts: {
     if (idx < 0 || idx >= courseFile.holes.length || idx === activeHole) return
     activeHole = idx
     refHole()
-    selectedBunkerIdx = null; selectedPlatIdx = null
+    selectTerrain()
     opts.onCourseChange(structuredClone(courseFile), activeHole)
     rebuild()
   }
@@ -1407,8 +1414,10 @@ export function initEditor(opts: {
 
   function buildWorldSection() {
     const { sec, content } = mksec('World')
-    content.appendChild(sliderRow('Width',  hole.worldW,     500, 8000, 50,  v => { hole.worldW    = v; emit() }))
-    content.appendChild(sliderRow('Height', hole.worldH,     400, 2000, 50,  v => { hole.worldH    = v; emit() }))
+    // Width/Height feed the max of other sliders (Hole X, tees, Base Y), so rebuild
+    // the sidebar on release to refresh those ranges.
+    content.appendChild(sliderRow('Width',  hole.worldW,     500, 8000, 50,  v => { hole.worldW    = v; emit() }, undefined, rebuild))
+    content.appendChild(sliderRow('Height', hole.worldH,     400, 2000, 50,  v => { hole.worldH    = v; emit() }, undefined, rebuild))
     content.appendChild(sliderRow('Base Y', hole.baseGround,  50, hole.worldH - 50, 10, v => { hole.baseGround = v; emit() }))
     sidebar.appendChild(sec)
   }
@@ -1537,8 +1546,7 @@ export function initEditor(opts: {
         friction: 4, shallowMult: 0.75, deepMult: 0.25, deepThreshold: 300,
       }
       hole.bunkers.push(newBunker)
-      selectedBunkerIdx = hole.bunkers.length - 1
-      selectedPlatIdx = null
+      selectBunker(hole.bunkers.length - 1)
       emit(); rebuild()
     }, 'add-btn'))
     hole.bunkers.forEach((b, bi) => content.appendChild(buildBunkerEl(b, bi)))
@@ -1549,19 +1557,19 @@ export function initEditor(opts: {
     const el = document.createElement('div')
     el.className = 'editor-segment' + (bi === selectedBunkerIdx ? ' platform-selected' : '')
     el.style.cursor = 'pointer'
-    el.addEventListener('click', () => { selectedBunkerIdx = bi; selectedPlatIdx = null; rebuild() })
+    el.addEventListener('click', () => { selectBunker(bi); rebuild() })
 
     const hdr = document.createElement('div'); hdr.className = 'segment-header'
     const name = document.createElement('span'); name.textContent = `Bunker ${bi + 1}`
     const dup = mkBtn('Dup', () => {
       const copy: Bunker = { ...b, topEdge: b.topEdge.map(p => ({ ...p })) }
       hole.bunkers.splice(bi + 1, 0, copy)
-      selectedBunkerIdx = bi + 1
+      selectBunker(bi + 1)
       emit(); rebuild()
     })
     const del = mkBtn('×', () => {
       hole.bunkers.splice(bi, 1)
-      if (selectedBunkerIdx === bi) selectedBunkerIdx = null
+      if (selectedBunkerIdx === bi) selectTerrain()
       else if (selectedBunkerIdx !== null && selectedBunkerIdx > bi) selectedBunkerIdx--
       emit(); rebuild()
     }, 'del-btn')
@@ -1604,7 +1612,7 @@ export function initEditor(opts: {
         edgeColor: src?.edgeColor ?? PLAT_EDGE_DEFAULT,
       }
       hole.platforms.push(plat)
-      selectedPlatIdx = hole.platforms.length - 1
+      selectPlatform(hole.platforms.length - 1)
       emit(); rebuild()
     }, 'add-btn'))
     hole.platforms.forEach((plat, pi) => {
@@ -1617,7 +1625,7 @@ export function initEditor(opts: {
     const el = document.createElement('div')
     el.className = 'editor-segment' + (pi === selectedPlatIdx ? ' platform-selected' : '')
     el.style.cursor = 'pointer'
-    el.addEventListener('click', () => { selectedPlatIdx = pi; rebuild() })
+    el.addEventListener('click', () => { selectPlatform(pi); rebuild() })
 
     const hdr = document.createElement('div'); hdr.className = 'segment-header'
     const name = document.createElement('span'); name.textContent = `Platform ${pi + 1}`
@@ -1629,12 +1637,12 @@ export function initEditor(opts: {
         edgeColor: plat.edgeColor,
       }
       hole.platforms.splice(pi + 1, 0, copy)
-      selectedPlatIdx = pi + 1
+      selectPlatform(pi + 1)
       emit(); rebuild()
     })
     const del = mkBtn('×', () => {
       hole.platforms.splice(pi, 1)
-      if (selectedPlatIdx === pi) selectedPlatIdx = null
+      if (selectedPlatIdx === pi) selectTerrain()
       else if (selectedPlatIdx !== null && selectedPlatIdx > pi) selectedPlatIdx--
       emit(); rebuild()
     }, 'del-btn')
@@ -1694,7 +1702,7 @@ export function initEditor(opts: {
     show() {
       courseFile = structuredClone(opts.getCourse())
       refHole()
-      selectedBunkerIdx = null; selectedPlatIdx = null
+      selectTerrain()
       undoStack = []; redoStack = []
       lastEmittedCourse = structuredClone(courseFile)
       syncUndoRedoBtns()

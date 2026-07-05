@@ -1,4 +1,4 @@
-import { buildSegments, terrainY, hexWithAlpha, buildSpline, splineY, waterPoolBounds, ensureCW } from './terrain'
+import { buildSegments, terrainY, hexWithAlpha, buildSpline, splineY, waterPoolBounds, ensureCW, SPLINE_BASE_REF, bunkerRimCoeffs } from './terrain'
 import type { Course, Hole, BuiltSegment, SplineCoeff, Platform } from './terrain'
 import { initEditor } from './editor'
 import { listCourses, getCourse, newCourse } from './courseapi'
@@ -11,8 +11,11 @@ import { listCourses, getCourse, newCourse } from './courseapi'
 export function mountGame(host: HTMLElement, opts: { openEditor?: boolean } = {}): { openEditor: () => void } {
 
 // ---- Canvas / render constants ----
-const CANVAS_W = 800
-const CANVAS_H = 540
+// Canvas grows with the window but never below this floor (see resizeCanvas).
+const MIN_CANVAS_W = 800
+const MIN_CANVAS_H = 540
+let CANVAS_W = MIN_CANVAS_W
+let CANVAS_H = MIN_CANVAS_H
 const BALL_RADIUS = 10
 const HOLE_W = BALL_RADIUS * 3   // fixed width — 1.5× ball diameter
 const HOLE_D = 40                 // fixed pit depth
@@ -38,8 +41,8 @@ let splineCoeffs: SplineCoeff[] = buildSpline(hole.controlPoints)
 
 function tY(x: number): number {
   const s = hole.useSpline, w = hole.useWaves
-  if (s && w) return splineY(x, splineCoeffs) + terrainY(x, builtSegs) - hole.baseGround
-  if (s)      return splineY(x, splineCoeffs)
+  if (s && w) return splineY(x, splineCoeffs) + terrainY(x, builtSegs) - SPLINE_BASE_REF
+  if (s)      return splineY(x, splineCoeffs) + hole.baseGround - SPLINE_BASE_REF
   if (w)      return terrainY(x, builtSegs)
   return hole.baseGround
 }
@@ -61,14 +64,16 @@ const WATER_GRADIENT_DEPTH = 80
 // overshooting (spline) terrain.
 function rebuildWaterPools() {
   waterPools = []
+  const off = hole.baseGround - SPLINE_BASE_REF
   for (const hz of hole.hazards) {
     if (hz.kind !== 'water' || hz.level == null) continue
-    const bounds = waterPoolBounds(hz.cx, hz.level, tY, hole.worldW)
+    const wl = hz.level + off
+    const bounds = waterPoolBounds(hz.cx, wl, tY, hole.worldW)
     if (!bounds) continue
     const { left, right } = bounds
     const path = new Path2D()
-    path.rect(left, hz.level, right - left, hole.worldH - hz.level)
-    waterPools.push({ left, right, level: hz.level, floorY: hz.level + WATER_GRADIENT_DEPTH, fillPath: path })
+    path.rect(left, wl, right - left, hole.worldH - wl)
+    waterPools.push({ left, right, level: wl, floorY: wl + WATER_GRADIENT_DEPTH, fillPath: path })
   }
 }
 rebuildWaterPools()
@@ -90,7 +95,7 @@ function rebuildBunkerPools() {
   bunkerPools = []
   for (const b of hole.bunkers) {
     if (b.topEdge.length < 2) continue
-    const coeffs = buildSpline(b.topEdge)
+    const coeffs = bunkerRimCoeffs(hole, b.topEdge)
     const leftX  = Math.min(...b.topEdge.map(p => p.x))
     const rightX = Math.max(...b.topEdge.map(p => p.x))
 
@@ -132,7 +137,7 @@ function sendActiveCourse() {
 }
 
 // ---- DOM setup ----
-host.style.cssText = 'background:#050505;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding-top:40px;position:relative'
+host.style.cssText = 'background:#050505;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding-top:10px;position:relative'
 
 const wrap = document.createElement('div')
 wrap.style.cssText = 'position:relative;display:inline-block'
@@ -176,6 +181,17 @@ zoomText.style.cssText = 'color:#666;font:13px monospace'
 zoomText.textContent = 'zoom'
 sliderRowEl.append(zoomText, zoomSlider, zoomLabel)
 host.appendChild(sliderRowEl)
+
+// Grow the canvas to fill the window (min MIN_CANVAS_W×H), leaving room for the
+// zoom-slider row. CANVAS_W/H are read fresh every frame, so the renderer adapts.
+function resizeCanvas() {
+  CANVAS_W = Math.max(MIN_CANVAS_W, Math.floor(window.innerWidth - 8))
+  CANVAS_H = Math.max(MIN_CANVAS_H, Math.floor(window.innerHeight - sliderRowEl.offsetHeight - 34))
+  canvas.width = CANVAS_W
+  canvas.height = CANVAS_H
+}
+resizeCanvas()
+window.addEventListener('resize', resizeCanvas)
 
 // ---- Cutouts ----
 // Only the hole gaps the terrain (it's a real pit the ball drops through). Water
@@ -267,7 +283,7 @@ let prevResting = true
 let cameraMode: 'follow' | 'free' = 'free'
 let restingDebounceStart: number | null = null
 let trulyResting = true, shotAllowedAt = 0
-let showingHole = false, prevInHole = false
+let showingHole = false
 let inWaterPenalty = false, inWaterSinking = false, waterSinkStartMs = 0
 
 function canShootNow() { return trulyResting && Date.now() >= shotAllowedAt }
@@ -611,41 +627,77 @@ const ws = new WebSocket('ws://localhost:8080/ws')
 // which made the ball spawn underground until an edit nudged an update).
 ws.onopen = () => { sendActiveCourse() }
 
-ws.onmessage = (e) => {
-  const { x, y, resting, inHole, inWater } = JSON.parse(e.data)
+function centerCamOn(wx: number, wy: number) {
+  const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
+  camX = Math.max(0, Math.min(wx - visW / 2, hole.worldW - visW))
+  camY = Math.max(0, Math.min(wy - visH * 0.65, hole.worldH - visH))
+}
+
+// `state` messages carry ball kinematics while it's in motion (and the settle
+// frame). Discrete `event` messages drive the hole/water/reset transitions that
+// used to be inferred from per-tick flags. The server stays silent at rest, so
+// these handlers must not depend on a steady frame stream.
+function onState(x: number, y: number, resting: boolean) {
+  // Penalty and hole holds freeze the ball where an event placed it; ignore stray
+  // position frames until a shot/reset clears the mode.
+  if (inWaterPenalty || showingHole) return
   physBallX = x; physBallY = y
-
-  if (inHole && !prevInHole) { showingHole = true; setTimeout(() => { showingHole = false }, 3500) }
-  if (prevInHole && !inHole) { ballX = physBallX; ballY = physBallY }
-  prevInHole = !!inHole
-
-  if (inWater && !resting && !inWaterSinking) { inWaterSinking = true; waterSinkStartMs = Date.now() }
-  if (inWater && resting && !inWaterPenalty) {
-    inWaterPenalty = true; inWaterSinking = false
-    trulyResting = true; restingDebounceStart = null
-    shotAllowedAt = Date.now() + 2 * SHOT_DELAY_MS
-    ballX = physBallX; ballY = physBallY
-    const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
-    camX = Math.max(0, Math.min(physBallX - visW / 2, hole.worldW - visW))
-    camY = Math.max(0, Math.min(physBallY - visH * 0.65, hole.worldH - visH))
-    cameraMode = 'free'
-  }
-  if (!inWater) { inWaterSinking = false; inWaterPenalty = false; ballX = physBallX; ballY = physBallY }
+  if (inWaterSinking) return  // sinking: follow the server's fall, no rest/cam logic
 
   if (!resting) {
     restingDebounceStart = null
     if (trulyResting) { trulyResting = false; shotAllowedAt = 0 }
     if (prevResting) {
       ballX = physBallX; ballY = physBallY
-      const visW = CANVAS_W / zoom, visH = CANVAS_H / zoom
-      camX = Math.max(0, Math.min(physBallX - visW / 2, hole.worldW - visW))
-      camY = Math.max(0, Math.min(physBallY - visH * 0.65, hole.worldH - visH))
+      centerCamOn(physBallX, physBallY)
       cameraMode = 'follow'
     }
-  } else if (!inHole && !inWater && restingDebounceStart === null) {
+  } else if (restingDebounceStart === null) {
     restingDebounceStart = Date.now()
   }
   prevResting = resting
+}
+
+function onEvent(m: { event: string; x: number; y: number; vx?: number; vy?: number }) {
+  switch (m.event) {
+    case 'shotFired':
+      // Clear any transient hold so the ball starts following its new flight.
+      // (Also the future hook for a launch sound / opponent-shot feedback.)
+      inWaterPenalty = false; inWaterSinking = false; showingHole = false
+      trulyResting = false; shotAllowedAt = 0; prevResting = true
+      break
+    case 'sank':
+      showingHole = true
+      physBallX = m.x; physBallY = m.y; ballX = m.x; ballY = m.y
+      setTimeout(() => { showingHole = false }, 3500)
+      break
+    case 'enteredWater':
+      inWaterSinking = true
+      waterSinkStartMs = Date.now()
+      break
+    case 'penaltyStart':
+      inWaterPenalty = true; inWaterSinking = false
+      trulyResting = true; restingDebounceStart = null
+      shotAllowedAt = Date.now() + 2 * SHOT_DELAY_MS
+      physBallX = m.x; physBallY = m.y; ballX = m.x; ballY = m.y
+      centerCamOn(m.x, m.y)
+      cameraMode = 'free'
+      break
+    case 'reset':
+      showingHole = false; inWaterSinking = false; inWaterPenalty = false
+      trulyResting = true; restingDebounceStart = null; shotAllowedAt = 0
+      prevResting = true
+      physBallX = m.x; physBallY = m.y; ballX = m.x; ballY = m.y
+      centerCamOn(m.x, m.y)
+      cameraMode = 'free'
+      break
+  }
+}
+
+ws.onmessage = (e) => {
+  const m = JSON.parse(e.data)
+  if (m.type === 'event') onEvent(m)
+  else onState(m.x, m.y, m.resting)  // "state" (also the plain connect snapshot)
 }
 
 ws.onclose = () => {
@@ -676,6 +728,7 @@ document.addEventListener('keydown', (e) => {
     ws.send(JSON.stringify({ type: 'skipTimer' }))
     shotAllowedAt = 0
     trulyResting = true
+    restingDebounceStart = null
     inWaterPenalty = false
     inWaterSinking = false
     showingHole = false
