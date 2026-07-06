@@ -50,28 +50,32 @@ const GRAVITY = 1500          // matches golfserver physics.Gravity
 const PUTTER_RAY_LEN = 220    // world px — fixed preview length for the putter's ground ray
 
 // ---- HUD layout constants (screen space) ----
-// The HUD is a floating overlay drawn directly over the game view (no
-// opaque backing bar) — individual controls carry their own translucent
-// fill. The whole cluster (club icons + spin icons + Hit! + meter) is
-// centered and sized to ~HUD_WIDTH_FRAC of the canvas width; the leftover
-// space is spent as gaps between the three groups so it spans that width
-// even though the meter itself stays narrow.
-const HUD_WIDTH_FRAC = 0.75
-const BOTTOM_MARGIN = 18
-const HUD_H = 52
-const ICON = 44        // finger-friendly tap target (≥44px); cluster stays centered
+// The HUD is a floating overlay drawn directly over the game view (no opaque
+// backing bar) — individual controls carry their own translucent fill. It's
+// laid out in TWO centered rows so nothing gets cramped on a phone:
+//   Row 1: club icons · bunker% · spin icons
+//   Row 2: Hit! button · power meter
+// A generous bottom margin keeps both rows clear of the on-screen edge.
+const ICON = 44        // finger-friendly tap target (≥44px)
 const ICON_GAP = 8
-const MIN_GROUP_GAP = 22
-const HIT_W = 52, HIT_H = 40
-const METER_W = 160   // fixed, narrow — not a full-width slider
-const METER_H = 24
-const BALL_R = 7
+const GROUP_GAP = 22   // gap between the club and spin groups (row 1)
+const BUNKER_W = 52    // reserved slot for the bunker-% readout (between the groups)
+const ROW_GAP = 14     // vertical gap between the two rows
+const BOTTOM_MARGIN = 34 // more room at the bottom (was 18)
+const HIT_W = 58, HIT_H = 44
+const HIT_METER_GAP = 14
+const METER_W = 220   // wider now that it owns its own row
+const METER_H = 26
+const BALL_R = 8
 
 interface HudLayout {
-  barTop: number; iconY: number
+  row1Y: number; row2Y: number   // top Y of each row's tallest element
+  iconY: number                  // row-1 icon top
   clubXs: number[]; spinXs: number[]
+  bunkerX: number                // left of the bunker-% slot (row 1)
   hitX: number; hitY: number
   meterX: number; meterY: number; meterW: number
+  top: number                    // topmost pixel of the HUD (for hit-testing)
 }
 
 function clamp(v: number, lo: number, hi: number): number { return Math.max(lo, Math.min(hi, v)) }
@@ -118,35 +122,40 @@ export class SwingEngine {
   }
 
   private layout(cw: number, ch: number): HudLayout {
-    const barTop = ch - HUD_H - BOTTOM_MARGIN
-    const iconY = barTop + (HUD_H - ICON) / 2
+    // Two rows, each centered independently. Row 2 (Hit! + meter) sits at the
+    // bottom; row 1 (clubs · bunker% · spin) sits a ROW_GAP above it.
+    const row2Y = ch - HIT_H - BOTTOM_MARGIN
+    const row1Y = row2Y - ROW_GAP - ICON
+    const iconY = row1Y
 
-    const clubGroupW = 3 * ICON + 2 * ICON_GAP
-    const spinGroupW = 3 * ICON + 2 * ICON_GAP
-    const hitMeterGroupW = HIT_W + 14 + METER_W
-    const contentW = clubGroupW + spinGroupW + hitMeterGroupW
-    const hudW = cw * HUD_WIDTH_FRAC
-    const gap = Math.max(MIN_GROUP_GAP, (hudW - contentW) / 2)
-    const totalW = contentW + gap * 2
-    let cx = (cw - totalW) / 2
-
+    // ---- Row 1: clubs · bunker% · spin, centered as a whole ----
+    const groupW = 3 * ICON + 2 * ICON_GAP
+    const row1W = groupW + GROUP_GAP + BUNKER_W + GROUP_GAP + groupW
+    let cx = (cw - row1W) / 2
     const clubXs: number[] = []
     for (let i = 0; i < 3; i++) { clubXs.push(cx); cx += ICON + ICON_GAP }
-    cx += gap - ICON_GAP
+    cx += GROUP_GAP - ICON_GAP
+    const bunkerX = cx
+    cx += BUNKER_W + GROUP_GAP
     const spinXs: number[] = []
     for (let i = 0; i < 3; i++) { spinXs.push(cx); cx += ICON + ICON_GAP }
-    cx += gap - ICON_GAP
-    const hitX = cx, hitY = barTop + (HUD_H - HIT_H) / 2
-    cx += HIT_W + 14
-    const meterX = cx, meterW = METER_W
-    const meterY = barTop + (HUD_H - METER_H) / 2
-    return { barTop, iconY, clubXs, spinXs, hitX, hitY, meterX, meterY, meterW }
+
+    // ---- Row 2: Hit! · meter, centered as a whole ----
+    const row2W = HIT_W + HIT_METER_GAP + METER_W
+    let rx = (cw - row2W) / 2
+    const hitX = rx
+    const hitY = row2Y
+    rx += HIT_W + HIT_METER_GAP
+    const meterX = rx, meterW = METER_W
+    const meterY = row2Y + (HIT_H - METER_H) / 2
+
+    return { row1Y, row2Y, iconY, clubXs, spinXs, bunkerX, hitX, hitY, meterX, meterY, meterW, top: row1Y }
   }
 
   /** Hit-tests a screen-space point against the HUD. Returns null if outside the bar. */
   hitTestHud(x: number, y: number, cw: number, ch: number): HudRegion | null {
     const L = this.layout(cw, ch)
-    if (y < L.barTop) return null
+    if (y < L.top) return null
     const inBox = (bx: number, by: number, bw: number, bh: number) =>
       x >= bx && x <= bx + bw && y >= by && y <= by + bh
     for (let i = 0; i < 3; i++) if (inBox(L.clubXs[i], L.iconY, ICON, ICON)) return `club:${CLUBS[i]}`
@@ -283,17 +292,15 @@ export class SwingEngine {
     CLUBS.forEach((c, i) => drawIcon(L.clubXs[i], CLUB_LABEL[c], this.club === c))
     SPINS.forEach((s, i) => drawIcon(L.spinXs[i], SPIN_LABEL[s], this.spin === s))
 
-    // Bunker penalty readout — shown to the right of the club group while the
-    // ball sits in sand: the selected club's power multiplier as a percentage
-    // (e.g. 25% / 70% / 50%). Sits in the gap between the club and spin groups
-    // (typically ~90px+; the min group gap is 22px so a tight window may crowd
-    // the spin group slightly, acceptable at that extreme).
+    // Bunker penalty readout — in its own slot between the club and spin groups
+    // (row 1). The selected club's power multiplier as a percentage (e.g.
+    // 25% / 70% / 50%), shown only while the ball sits in sand.
     if (this.inBunker) {
       const pct = Math.round(CLUB_BUNKER_PENALTY[this.club] * 100)
-      const px = L.clubXs[2] + ICON + 8
+      const px = L.bunkerX + BUNKER_W / 2
       const py = L.iconY + ICON / 2
-      ctx.font = 'bold 15px monospace'
-      ctx.textAlign = 'left'; ctx.textBaseline = 'middle'
+      ctx.font = 'bold 16px monospace'
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
       ctx.fillStyle = 'rgba(0,0,0,0.55)'
       ctx.fillText(`${pct}%`, px + 1, py + 1)     // shadow for legibility over terrain
       ctx.fillStyle = '#ffcf5c'                    // sandy amber
