@@ -569,7 +569,12 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         // Hit! meter, not release, so onUp just finalizes the angle.
         if (!canShoot()) return
         canvas.setPointerCapture(e.pointerId)
-        const startSx = p.x, startSy = p.y
+        // On mobile (portrait): anchor the aim origin to the pre-drawn aim circle's
+        // center so the slingshot + dead-zone circle stay centered on it. Desktop
+        // keeps the click-anywhere press-point origin.
+        const az = swing.aimZone(cam.cw, cam.ch)
+        const startSx = chrome.portrait ? az.x : p.x
+        const startSy = chrome.portrait ? az.y : p.y
         const preDragAngle = swing.aimAngle
         aiming = true; aimStartSx = startSx; aimStartSy = startSy; aimCurSx = startSx; aimCurSy = startSy
         const applyAim = (mx: number, my: number) => {

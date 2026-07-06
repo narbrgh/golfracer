@@ -715,11 +715,15 @@ canvas.addEventListener('pointerdown', (e) => {
 
   if (!canShootNow()) return
 
-  // Aim is set from the drag's start -> current point, not from the ball's
-  // screen position — the click doesn't need to land on the ball. Staying
-  // within AIM_DEADZONE_R of the start is a dead zone: the angle is left at
-  // whatever it was before this drag, so releasing there cancels cleanly.
-  const startSx = cx, startSy = cy
+  // Aim origin: on mobile (portrait), anchor it to the CENTER of the pre-drawn
+  // aim circle (not the press point) so the slingshot and the dead-zone circle
+  // stay centered on that circle no matter where within it you press. On desktop,
+  // keep the click-anywhere origin (the press point). Staying within
+  // AIM_DEADZONE_R of the origin is a dead zone: the angle is left at whatever it
+  // was, so releasing there cancels cleanly.
+  const az = swing.aimZone(cam.cw, cam.ch)
+  const startSx = chrome.portrait ? az.x : cx
+  const startSy = chrome.portrait ? az.y : cy
   const preDragAngle = swing.aimAngle
   aiming = true; aimStartSx = startSx; aimStartSy = startSy; aimCurSx = cx; aimCurSy = cy
   canvas.setPointerCapture(e.pointerId)
