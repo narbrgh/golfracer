@@ -99,7 +99,11 @@ func Build(hole terrain.Hole) Geometry {
 		y, sand := surfaceAt(x)
 		if !inGap(prevX) && !inGap(x) {
 			if prevSand || sand {
-				edges = append(edges, physics.NewEdgeMat(prevX, prevY, x, y, BunkerRestitution, BunkerBounceFric))
+				// NewSandEdge marks the edge Sand so Tick uses Current.BunkerFriction
+				// for rolling deceleration (NewEdgeMat does NOT set that flag, which
+				// left multiplayer sand rolling with the normal grass friction —
+				// the Bunker Friction tunable had no effect in matches).
+				edges = append(edges, physics.NewSandEdge(prevX, prevY, x, y, BunkerRestitution, BunkerBounceFric))
 			} else {
 				edges = append(edges, physics.NewEdge(prevX, prevY, x, y))
 			}

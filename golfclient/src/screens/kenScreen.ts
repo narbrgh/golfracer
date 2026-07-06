@@ -43,7 +43,7 @@ const SERVER_FIELDS: FieldSpec[] = [
 ]
 
 const BUNKER_FIELDS: FieldSpec[] = [
-  { key: 'bunkerFriction', label: 'Bunker Friction', description: 'px/s² kinetic deceleration while rolling in a bunker (one global value — no more per-bunker deep/shallow setting)', step: 1, min: 0, max: 100 },
+  { key: 'bunkerFriction', label: 'Bunker Friction', description: 'px/s² kinetic deceleration while rolling in a bunker. For reference grass (Rolling Friction) is 200 — set this ABOVE that for grabby sand.', step: 10, min: 0, max: 3000 },
 ]
 
 const PENALTY_FIELDS: FieldSpec[] = [

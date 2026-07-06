@@ -15,6 +15,18 @@ export interface GameCameraConfig {
   followLerp?: number
   followBiasY?: number // fraction of viewport height the follow target sits down from the top
   panStep?: number      // screen px/frame per held arrow key, in free-look
+  zoomLerp?: number      // per-frame lerp toward the target follow zoom (shot auto-zoom)
+  framePad?: number      // fraction of extra margin around a framed region (ball+hole, or shot arc)
+  holeFrameFrac?: number // frame ball+hole together when the hole is within this fraction of a viewport width
+}
+
+// followTarget can carry a secondary world point (the hole) to keep in frame,
+// and whether the ball is currently moving (drives the shot auto-zoom).
+export interface FollowTarget {
+  x: number
+  y: number
+  secondary?: { x: number; y: number } | null
+  ballMoving?: boolean
 }
 
 function clamp(v: number, lo: number, hi: number): number { return Math.max(lo, Math.min(hi, v)) }
@@ -32,6 +44,17 @@ export class GameCamera {
   private held = new Set<string>()
   private cfg: Required<GameCameraConfig>
 
+  // Shot auto-zoom state (follow mode). On launch we predict the shot's flight
+  // duration + how wide a zoom fits the whole arc, then drive zoom by an eased
+  // progress p (0..1) over that duration: out fast-then-slow to the wide zoom by
+  // mid-flight, then in slow-then-fast back toward 1 on the descent — instead of
+  // chasing the ball's growing distance (which lags). shotActive is true from
+  // launch until the ball rests (endShot).
+  private shotActive = false
+  private shotStartMs = 0
+  private shotDurMs = 0
+  private shotWideZoom = 1
+
   constructor(cfg: GameCameraConfig = {}) {
     this.cfg = {
       minZoom: cfg.minZoom ?? 0.35,
@@ -39,6 +62,9 @@ export class GameCamera {
       followLerp: cfg.followLerp ?? 0.2,
       followBiasY: cfg.followBiasY ?? 0.6,
       panStep: cfg.panStep ?? 14,
+      zoomLerp: cfg.zoomLerp ?? 0.08,
+      framePad: cfg.framePad ?? 0.22,
+      holeFrameFrac: cfg.holeFrameFrac ?? 0.95,
     }
   }
 
@@ -81,13 +107,100 @@ export class GameCamera {
     this.clampCam()
   }
 
-  /** Call once per frame. followTarget is the world point to track in follow mode (null if there's nothing to follow yet). */
-  update(followTarget: { x: number; y: number } | null) {
-    const visW = this.cw / this.zoom, visH = this.ch / this.zoom
+  /**
+   * Marks a shot launched with velocity (vx,vy) under `gravity`. Predicts the
+   * flight duration and how far the arc travels, then follow mode drives an eased
+   * zoom-out→zoom-in over that duration (see update()). Falls back gracefully for
+   * a putt/near-zero shot (no meaningful zoom-out).
+   */
+  startShot(vx: number, vy: number, gravity: number) {
+    // Ballistic flight time back to (roughly) launch height: t = -2*vy/g for an
+    // up-shot; for a level/down shot use a short floor so the profile still runs.
+    const tUp = vy < 0 ? (-2 * vy) / gravity : 0
+    const dur = Math.max(0.35, tUp) * 1000
+    // Predicted horizontal range + peak rise, to size how wide to zoom.
+    const range = Math.abs(vx) * (dur / 1000)
+    const rise = vy < 0 ? (vy * vy) / (2 * gravity) : 0
+    const spanX = Math.max(1, range)
+    const spanY = Math.max(1, rise)
+    const pad = 1 + this.cfg.framePad * 2
+    const fit = Math.min(this.cw / (spanX * pad), this.ch / (spanY * pad))
+    const fullWide = clamp(Math.min(1, fit), this.cfg.minZoom, 1)
+    // Subtle zoom-out: pull the wide target halfway back toward 1, so the swing
+    // is about half as deep as a full arc-fit.
+    this.shotWideZoom = 1 + (fullWide - 1) * 0.5
+    this.shotStartMs = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+    this.shotDurMs = dur
+    this.shotActive = true
+  }
+  /** Ends the shot auto-zoom (ball has settled) — the camera eases back toward zoom 1. */
+  endShot() { this.shotActive = false }
+
+  // Eased shot "openness" 0..1 (0 = zoom 1, 1 = fully zoomed out) as a function
+  // of flight progress p. Rising half [0,0.5]: ease-OUT (zoom out FAST then
+  // slow). Falling half [0.5,1]: starts slow then FAST (zoom in slow then quick).
+  private shotOpenness(p: number): number {
+    if (p <= 0.5) { const u = p / 0.5; return 1 - (1 - u) * (1 - u) }
+    const u = (p - 0.5) / 0.5; return 1 - u * u
+  }
+
+  /**
+   * Call once per frame. followTarget is the world point to track in follow mode
+   * (null if there's nothing to follow yet). It may carry a `secondary` point
+   * (the hole) to keep in frame when it's close, and `ballMoving` to drive the
+   * post-shot auto-zoom.
+   */
+  update(followTarget: FollowTarget | null) {
     if (this.mode === 'follow') {
       if (!followTarget) return
-      let tx = followTarget.x - visW / 2
-      let ty = followTarget.y - visH * this.cfg.followBiasY
+
+      // Region to frame (world space): the ball, plus the hole when it's close.
+      let minX = followTarget.x, maxX = followTarget.x
+      let minY = followTarget.y, maxY = followTarget.y
+
+      if (this.shotActive && followTarget.ballMoving) {
+        // ---- Shot auto-zoom: driven by eased flight PROGRESS (predicted at
+        // launch), not the ball's growing distance, so it commits to zooming out
+        // immediately. Zoom is set directly here (not via region-fit / lerp).
+        const now = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+        const p = clamp((now - this.shotStartMs) / this.shotDurMs, 0, 1)
+        const o = this.shotOpenness(p)
+        this.zoom = 1 + (this.shotWideZoom - 1) * o
+        // Follow the ball, but ease the focus toward mid-flight so the incoming
+        // ground ahead is visible while zoomed out.
+        const visW = this.cw / this.zoom, visH = this.ch / this.zoom
+        let tx = followTarget.x - visW / 2
+        let ty = followTarget.y - visH * this.cfg.followBiasY
+        tx = this.worldW <= visW ? (this.worldW - visW) / 2 : clamp(tx, 0, this.worldW - visW)
+        ty = this.worldH <= visH ? (this.worldH - visH) / 2 : clamp(ty, 0, this.worldH - visH)
+        this.camX += (tx - this.camX) * this.cfg.followLerp
+        this.camY += (ty - this.camY) * this.cfg.followLerp
+        return
+      }
+
+      // ---- Idle / hole framing: fit the ball (+ hole when close) at up to zoom
+      // 1, preferring a pure PAN; ease zoom back toward the fit each frame.
+      let pad = 1
+      if (followTarget.secondary) {
+        const baseVisW = this.cw // zoom 1
+        if (Math.abs(followTarget.secondary.x - followTarget.x) <= baseVisW * this.cfg.holeFrameFrac) {
+          minX = Math.min(minX, followTarget.secondary.x); maxX = Math.max(maxX, followTarget.secondary.x)
+          minY = Math.min(minY, followTarget.secondary.y); maxY = Math.max(maxY, followTarget.secondary.y)
+          pad = 1.06 // slight breathing room; stays zoom 1 unless they overflow
+        }
+      }
+      const regionW = Math.max(1, (maxX - minX) * pad)
+      const regionH = Math.max(1, (maxY - minY) * pad)
+      const fitZoom = Math.min(this.cw / regionW, this.ch / regionH)
+      const targetZoom = clamp(Math.min(1, fitZoom), this.cfg.minZoom, 1)
+      this.zoom += (targetZoom - this.zoom) * this.cfg.zoomLerp
+
+      const visW = this.cw / this.zoom, visH = this.ch / this.zoom
+      const cxWorld = (minX + maxX) / 2
+      const cyWorld = (minY + maxY) / 2
+      const focusY = (cyWorld + followTarget.y) / 2
+      let tx = cxWorld - visW / 2
+      let ty = focusY - visH * this.cfg.followBiasY
       tx = this.worldW <= visW ? (this.worldW - visW) / 2 : clamp(tx, 0, this.worldW - visW)
       ty = this.worldH <= visH ? (this.worldH - visH) / 2 : clamp(ty, 0, this.worldH - visH)
       this.camX += (tx - this.camX) * this.cfg.followLerp

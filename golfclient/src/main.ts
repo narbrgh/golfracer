@@ -115,6 +115,19 @@ function rebuildBunkerPools() {
 }
 rebuildBunkerPools()
 
+// ballInBunker mirrors the server's bunker check (main.go ballInBunker): the
+// ball's X is within a bunker's span and the sand rim there sits above the bare
+// terrain (rimY < groundY, smaller Y = higher on screen). Used to drive the
+// swing's bunker-penalty HUD % and shot prediction; the server re-checks
+// authoritatively so this is purely for on-screen feedback.
+function ballInBunker(): boolean {
+  for (const bp of bunkerPools) {
+    if (ballX < bp.leftX || ballX > bp.rightX) continue
+    if (splineY(ballX, bp.coeffs) < tY(ballX)) return true
+  }
+  return false
+}
+
 // updateHole makes h the active hole for rendering and rebuilds the derived
 // terrain/water/bunker caches from it.
 function updateHole(h: Hole) {
@@ -126,6 +139,21 @@ function updateHole(h: Hole) {
   cam.setWorld(h.worldW, h.worldH)
   cam.centerOn(h.teeBackX, tY(h.teeBackX))
   holeStartMs = Date.now()
+}
+
+// advanceHole moves single-player play to the next hole after a sink, wrapping
+// back to hole 1 after the last so a round loops continuously. It updates the
+// local render state and tells the server to re-tee on the new hole via
+// selectHole (the server rebuilds physics + emits a "reset" that snaps the ball
+// to the new tee).
+function advanceHole() {
+  const n = courseData.holes.length
+  if (n <= 1) return
+  activeHole = (activeHole + 1) % n
+  updateHole(courseData.holes[activeHole])
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'selectHole', hole: activeHole }))
+  }
 }
 
 // sendActiveCourse pushes the whole course + active hole index to the server for
@@ -272,6 +300,9 @@ const swing = new SwingEngine({ ballColorHex: '#fff' })
 
 function launch(vx: number, vy: number) {
   ws.send(JSON.stringify({ type: 'shoot', vx, vy, club: swing.club }))
+  // Auto-zoom out to capture the trajectory from here; eases back in once the
+  // ball settles (see the rest-detection in tick()). GRAVITY matches the server.
+  cam.startShot(vx, vy, 1500)
 }
 
 function drawSunAndMountains() {
@@ -364,6 +395,15 @@ function drawMinimapContent(mwx: (wx: number) => number, mwy: (wy: number) => nu
     ctx.roundRect(mx, my, mw, mh, 1); ctx.fill()
   }
 
+  // Bunkers: draw each rim as a sandy line along its spline.
+  ctx.strokeStyle = 'rgba(210,185,100,0.95)'; ctx.lineWidth = 2
+  for (const bp of bunkerPools) {
+    ctx.beginPath()
+    ctx.moveTo(mwx(bp.leftX), mwy(splineY(bp.leftX, bp.coeffs)))
+    for (let x = bp.leftX + 20; x <= bp.rightX; x += 20) ctx.lineTo(mwx(x), mwy(splineY(x, bp.coeffs)))
+    ctx.stroke()
+  }
+
   ctx.fillStyle = '#e44'; ctx.beginPath()
   ctx.arc(mwx(hole.holeX), mwy(tY(hole.holeX)), 3, 0, Math.PI * 2); ctx.fill()
   ctx.fillStyle = '#fff'; ctx.beginPath()
@@ -450,13 +490,16 @@ function draw() {
   ctx.moveTo(flagBaseX, flagBaseY - 55); ctx.lineTo(flagBaseX + 24, flagBaseY - 44)
   ctx.lineTo(flagBaseX, flagBaseY - 33); ctx.closePath(); ctx.fill()
 
+  // Sinking into water: don't fade the ball out — tint it slightly bluer so it
+  // reads as underwater while staying clearly visible.
+  let ballFill = '#fff'
   if (inWaterSinking) {
-    const elapsed = Math.min(1, (Date.now() - waterSinkStartMs) / 1000)
-    ctx.globalAlpha = Math.max(0, 1 - elapsed)
+    const t = Math.min(1, (Date.now() - waterSinkStartMs) / 1000)
+    const r = Math.round(255 - 90 * t), g = Math.round(255 - 45 * t), b = 255
+    ballFill = `rgb(${r},${g},${b})`
   }
-  ctx.fillStyle = '#fff'; ctx.beginPath()
+  ctx.fillStyle = ballFill; ctx.beginPath()
   ctx.arc(ballX, ballY, BALL_RADIUS, 0, Math.PI * 2); ctx.fill()
-  ctx.globalAlpha = 1
 
   if (trulyResting && shotAllowedAt > 0 && Date.now() < shotAllowedAt) {
     if (inWaterPenalty) {
@@ -535,13 +578,22 @@ function updateHud() {
 // ---- Loop ----
 function tick() {
   requestAnimationFrame(tick)  // schedule first — render exceptions can't kill the loop
+  // Only flag the bunker penalty when the ball is settled and ready to shoot —
+  // not while it's still flying over the sand (canPreviewShot gates the parabola
+  // preview the same way).
+  swing.inBunker = canPreviewShot() && ballInBunker()
   swing.update(Date.now())
   ballX += (physBallX - ballX) * BALL_LERP
   ballY += (physBallY - ballY) * BALL_LERP
   if (!trulyResting && restingDebounceStart !== null && Date.now() - restingDebounceStart >= REST_DEBOUNCE_MS) {
     trulyResting = true; shotAllowedAt = Date.now() + SHOT_DELAY_MS
+    cam.endShot() // ball settled — ease the camera back in
   }
-  cam.update({ x: ballX, y: ballY })
+  cam.update({
+    x: ballX, y: ballY,
+    secondary: { x: hole.holeX, y: tY(hole.holeX) },
+    ballMoving: !trulyResting,
+  })
   draw()
   updateHud()
 }
@@ -678,8 +730,9 @@ function onEvent(m: { event: string; x: number; y: number; vx?: number; vy?: num
       break
     case 'sank':
       showingHole = true
+      cam.endShot()
       physBallX = m.x; physBallY = m.y; ballX = m.x; ballY = m.y
-      setTimeout(() => { showingHole = false }, 3500)
+      setTimeout(() => { showingHole = false; advanceHole() }, 3500)
       break
     case 'enteredWater':
       inWaterSinking = true
@@ -690,14 +743,14 @@ function onEvent(m: { event: string; x: number; y: number; vx?: number; vy?: num
       trulyResting = true; restingDebounceStart = null
       shotAllowedAt = Date.now() + 2 * SHOT_DELAY_MS
       physBallX = m.x; physBallY = m.y; ballX = m.x; ballY = m.y
-      cam.centerOn(m.x, m.y)
+      cam.endShot(); cam.centerOn(m.x, m.y)
       break
     case 'reset':
       showingHole = false; inWaterSinking = false; inWaterPenalty = false
       trulyResting = true; restingDebounceStart = null; shotAllowedAt = 0
       prevResting = true
       physBallX = m.x; physBallY = m.y; ballX = m.x; ballY = m.y
-      cam.centerOn(m.x, m.y)
+      cam.endShot(); cam.centerOn(m.x, m.y)
       break
   }
 }

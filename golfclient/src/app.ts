@@ -72,7 +72,7 @@ const roomsBrowser = createRoomsBrowser({
 })
 
 const match = createMatchScreen({
-  onShoot: (vx, vy) => lobbyNet.shoot(vx, vy),
+  onShoot: (vx, vy, club) => lobbyNet.shoot(vx, vy, club),
   onReturn: () => lobbyNet.matchReturn(),
   onLeave: () => lobbyNet.leaveRoom(),
 })

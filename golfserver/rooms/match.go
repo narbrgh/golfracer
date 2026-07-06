@@ -21,18 +21,25 @@ import (
 const (
 	matchTickRate     = time.Second / 60
 	countdownTicks    = 3 * 60
-	holeCapTicks      = 90 * 60 // per-hole time cap; unsunk at the cap is a DNF
+	holeCapTicks      = 300 * 60 // per-hole time cap (5 min); unsunk at the cap is a DNF — the full 5 min is added to the player's total (see finishHole)
 	intermissionTicks = 6 * 60
 	resultsTicks      = 25 * 60 // auto-return to lobby if the host never clicks
 	matchBallRadius   = 10.0
 	waterBankOffset   = 20.0
-	maxShotSpeed      = 1500.0 // matches the client's MAX_DRAG * POWER_SCALE
+	maxShotSpeed      = 2000.0 // matches the client's strongest club (driver) max speed
 	ballCollRest      = 0.9    // restitution for ball-ball impacts
 
 	// Cooldown after a ball settles before its owner may shoot again (the red
 	// draining ring). Water incurs double, shown as the "double ring" penalty.
 	shotDelayTicks    = 150 // 2.5s
 	waterPenaltyTicks = 300 // 5s
+
+	// A ball that enters water sinks under real physics (gravity + terrain
+	// collision, heavy drag, no bounce) for this long before respawning on the
+	// near shore — mirrors the single-player water sink (main.go).
+	waterSinkTicks  = 300 // 5s submerged before respawn
+	waterDrag       = 0.90
+	waterBounceKill = 0.0 // upward velocity multiplier while submerged (kills bounce)
 )
 
 type MatchPhase string
@@ -60,11 +67,19 @@ type matchBall struct {
 	shootReadyTick uint64
 	penaltyPending bool
 	wasResting     bool
+
+	// Water sink: ticks remaining in the submerged phase (>0 while the ball is
+	// sinking under water). During it the ball runs damped physics and normal
+	// water/hole/settle handling is skipped; at 0 it respawns on the near bank.
+	// bankX/bankY hold the respawn target chosen on entry.
+	sinkTicksLeft uint64
+	bankX, bankY  float64
 }
 
 type shootCmd struct {
 	playerID int
 	vx, vy   float64
+	club     string // driver | wedge | putter — for the (future) bunker penalty
 }
 
 type Match struct {
@@ -190,6 +205,21 @@ func (mt *Match) step() bool {
 	return true
 }
 
+// ballInBunker reports whether world-x sits over a bunker (the sand rim there is
+// above the bare terrain). Mirrors single-player main.go ballInBunker and the
+// client's check, so the in-bunker shot penalty applies consistently.
+func (mt *Match) ballInBunker(x float64) bool {
+	for _, bk := range mt.geom.Bunkers {
+		if x < bk.LeftX || x > bk.RightX {
+			continue
+		}
+		if terrain.SplineY(x, bk.Coeffs) < mt.geom.CTY(x) {
+			return true
+		}
+	}
+	return false
+}
+
 func (mt *Match) applyShoot(c shootCmd) {
 	if mt.phase != PhasePlaying {
 		return
@@ -199,6 +229,23 @@ func (mt *Match) applyShoot(c shootCmd) {
 			continue
 		}
 		vx, vy := c.vx, c.vy
+		// Bunker penalty: if the ball sits in sand, scale power by the firing
+		// club's multiplier — matching single-player (main.go "shoot" handler).
+		if mt.ballInBunker(b.ball.X) {
+			var mult float64
+			switch c.club {
+			case "driver":
+				mult = physics.Current.DriverPenalty
+			case "wedge":
+				mult = physics.Current.WedgePenalty
+			case "putter":
+				mult = physics.Current.PutterPenalty
+			default:
+				mult = 1
+			}
+			vx *= mult
+			vy *= mult
+		}
 		if s := math.Hypot(vx, vy); s > maxShotSpeed {
 			k := maxShotSpeed / s
 			vx, vy = vx*k, vy*k
@@ -239,6 +286,7 @@ func (mt *Match) loadHole(idx int) {
 		b.shootReadyTick = 0
 		b.penaltyPending = false
 		b.wasResting = true
+		b.sinkTicksLeft = 0
 	}
 	mt.sendHole(idx)
 }
@@ -246,25 +294,44 @@ func (mt *Match) loadHole(idx int) {
 func (mt *Match) simulate() {
 	hole := mt.holes[mt.holeIdx]
 	subDt := matchTickRate.Seconds() / 4
+	nearbyEdges := func(b *physics.Ball) []physics.Edge {
+		lo := b.X - b.Radius - 4
+		hi := b.X + b.Radius + 4
+		var nearby []physics.Edge
+		for _, e := range mt.geom.Edges {
+			xMin, xMax := e.X0, e.X1
+			if xMin > xMax {
+				xMin, xMax = xMax, xMin
+			}
+			if xMax < lo || xMin > hi {
+				continue
+			}
+			nearby = append(nearby, e)
+		}
+		return nearby
+	}
 	for ss := 0; ss < 4; ss++ {
 		for _, b := range mt.balls {
 			if b.sunk || b.ball == nil {
 				continue
 			}
-			lo := b.ball.X - b.ball.Radius - 4
-			hi := b.ball.X + b.ball.Radius + 4
-			var nearby []physics.Edge
-			for _, e := range mt.geom.Edges {
-				xMin, xMax := e.X0, e.X1
-				if xMin > xMax {
-					xMin, xMax = xMax, xMin
+			if b.sinkTicksLeft > 0 {
+				// Submerged: keep terrain collision but damp velocity and kill any
+				// upward (bounce) component so the ball sinks and settles on the
+				// underwater floor instead of passing through it or bouncing.
+				b.ball.Resting = false
+				b.ball.VX *= waterDrag
+				b.ball.VY *= waterDrag
+				if b.ball.VY < 0 {
+					b.ball.VY *= waterBounceKill
 				}
-				if xMax < lo || xMin > hi {
-					continue
+				b.ball.Tick(subDt, nearbyEdges(b.ball), 0, hole.WorldW, 0)
+				if b.ball.VY < 0 {
+					b.ball.VY *= waterBounceKill
 				}
-				nearby = append(nearby, e)
+				continue
 			}
-			b.ball.Tick(subDt, nearby, 0, hole.WorldW, 0)
+			b.ball.Tick(subDt, nearbyEdges(b.ball), 0, hole.WorldW, 0)
 		}
 		mt.resolveCollisions()
 	}
@@ -274,10 +341,26 @@ func (mt *Match) simulate() {
 		if b.sunk || b.ball == nil {
 			continue
 		}
-		// Water: reset to the near bank (simple penalty — the lost time is the cost).
-		// Starts the double-length shot cooldown (the double ring). No invulnerability:
-		// the opponent can legitimately shove a fresh ball back into the hazard.
-		watered := false
+		// Already submerged: run down the 5s sink, then respawn on the near bank
+		// and start the double-length shot cooldown (the double ring). No normal
+		// water/hole/settle handling while sinking.
+		if b.sinkTicksLeft > 0 {
+			b.sinkTicksLeft--
+			if b.sinkTicksLeft == 0 {
+				b.ball.X, b.ball.Y = b.bankX, b.bankY
+				b.ball.VX, b.ball.VY = 0, 0
+				b.ball.Resting = true
+				b.shootReadyTick = mt.tick + waterPenaltyTicks
+				b.penaltyPending = true
+				b.wasResting = true
+			}
+			continue
+		}
+		// Water entry: begin the submerged sink (the ball keeps its momentum into
+		// the water; the submerged branch damps it). Respawn bank is chosen now
+		// from the side the ball entered. No invulnerability — the opponent can
+		// legitimately shove a fresh ball back into the hazard.
+		entered := false
 		for i := range mt.geom.Water {
 			t := &mt.geom.Water[i]
 			if b.ball.X >= t.L && b.ball.X <= t.R && b.ball.Y+b.ball.Radius >= t.Surface {
@@ -285,18 +368,15 @@ func (mt *Match) simulate() {
 				if b.ball.X > t.CX {
 					bankX = t.R + waterBankOffset
 				}
-				b.ball.X = bankX
-				b.ball.Y = cty(bankX) - b.ball.Radius
-				b.ball.VX, b.ball.VY = 0, 0
-				b.ball.Resting = true
-				b.shootReadyTick = mt.tick + waterPenaltyTicks
-				b.penaltyPending = true
-				watered = true
+				b.bankX = bankX
+				b.bankY = cty(bankX) - b.ball.Radius
+				b.sinkTicksLeft = waterSinkTicks
+				entered = true
 				break
 			}
 		}
-		if watered {
-			b.wasResting = true // don't let the settle branch overwrite the penalty
+		if entered {
+			b.wasResting = false // it's moving (sinking), not resting
 			continue
 		}
 		// Hole: sink + record finish time.
@@ -437,6 +517,7 @@ func (mt *Match) broadcastState() {
 			"playerId": b.playerID, "x": x, "y": y,
 			"color": b.color, "resting": resting, "sunk": b.sunk,
 			"readyInMs": readyInMs, "penalty": b.penaltyPending,
+			"inWater": b.sinkTicksLeft > 0,
 		})
 	}
 	msLeft := 0
@@ -524,15 +605,17 @@ func (m *Manager) BeginMatch(roomID string, holes []terrain.Hole) {
 	go mt.run()
 }
 
-// MatchShoot routes a shot to the shooter's ball in their room's match.
-func (m *Manager) MatchShoot(playerID int, vx, vy float64) {
+// MatchShoot routes a shot to the shooter's ball in their room's match. club is
+// the firing club (driver|wedge|putter); it is carried through for the bunker
+// penalty (not yet applied in the match loop — see applyShoot).
+func (m *Manager) MatchShoot(playerID int, vx, vy float64, club string) {
 	m.mu.Lock()
 	roomID := m.playerRoom[playerID]
 	mt := m.matches[roomID]
 	m.mu.Unlock()
 	if mt != nil {
 		select {
-		case mt.shoots <- shootCmd{playerID: playerID, vx: vx, vy: vy}:
+		case mt.shoots <- shootCmd{playerID: playerID, vx: vx, vy: vy, club: club}:
 		default:
 		}
 	}

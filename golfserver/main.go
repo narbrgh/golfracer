@@ -36,10 +36,15 @@ const (
 	waterPenaltyOffset = 20.0
 	waterPenaltyTicks  = 5 * 60
 
-	sinkFallTicks  = 60
-	sinkWaitTicks  = 30
-	sinkTotalTicks = sinkFallTicks + sinkWaitTicks
-	sinkDepth      = 40.0
+	// Ball entering water sinks under real physics (gravity + terrain collision,
+	// but no bounce and heavy drag — see the submerged branch) for this long
+	// before it respawns on the near shore. This is the "5 seconds underwater"
+	// time cost of a water hazard.
+	waterSinkTicks = 5 * 60 // 5s submerged before respawn
+	// Per-tick velocity retention while submerged (heavy water drag) and the
+	// factor applied to any upward velocity so the ball sinks rather than bounces.
+	waterDrag        = 0.90
+	waterBounceKill  = 0.0
 
 	holeHoldTicks = 180
 
@@ -333,8 +338,6 @@ func main() {
 	var ballMu sync.Mutex
 	inHoleTicks := 0
 	sinkTicks := 0
-	sinkEntryX := 0.0
-	sinkEntryY := 0.0
 	inWaterTicks := 0
 	penaltyFrozen := false // ball locked at penalty spot until next shot
 	penaltyX := 0.0
@@ -367,6 +370,26 @@ func main() {
 			}
 		}
 		return false
+	}
+
+	// nearbyEdges returns the terrain edges whose X-span overlaps the ball, for
+	// collision. Shared by the normal play loop and the submerged-sink loop so
+	// both collide against exactly the same surface.
+	nearbyEdges := func() []physics.Edge {
+		lo := ball.X - ball.Radius - 4
+		hi := ball.X + ball.Radius + 4
+		var nearby []physics.Edge
+		for _, e := range terrainEdges {
+			xMin, xMax := e.X0, e.X1
+			if xMin > xMax {
+				xMin, xMax = xMax, xMin
+			}
+			if xMax < lo || xMin > hi {
+				continue
+			}
+			nearby = append(nearby, e)
+		}
+		return nearby
 	}
 
 	// setActive switches the played/previewed hole. It swaps in the new course +
@@ -424,14 +447,25 @@ func main() {
 				}
 
 			case sinkTicks > 0:
-				if sinkTicks > sinkWaitTicks {
-					progress := float64(sinkTotalTicks-sinkTicks) / float64(sinkFallTicks)
-					ball.Y = sinkEntryY + progress*sinkDepth
-				} else {
-					ball.Y = sinkEntryY + sinkDepth
+				// Submerged: keep real physics so the ball collides with the
+				// terrain under the water (it won't sink through the ground), but
+				// apply heavy water drag and kill any upward velocity so it sinks
+				// and settles on the underwater floor instead of bouncing. The ball
+				// is force-unrested each substep so gravity keeps pulling it down
+				// even after it momentarily settles (until the 5s wait elapses).
+				subDt := tickRate.Seconds() / 4
+				for ss := 0; ss < 4; ss++ {
+					ball.Resting = false
+					ball.VX *= waterDrag
+					ball.VY *= waterDrag
+					if ball.VY < 0 {
+						ball.VY *= waterBounceKill // remove upward (bounce) velocity
+					}
+					ball.Tick(subDt, nearbyEdges(), 0, hole.WorldW, 0)
+					if ball.VY < 0 {
+						ball.VY *= waterBounceKill // suppress bounce imparted by Tick
+					}
 				}
-				ball.X = sinkEntryX
-				ball.VX, ball.VY = 0, 0
 				state = ballState{X: ball.X, Y: ball.Y, Resting: false, InWater: true}
 				sinkTicks--
 				if sinkTicks == 0 {
@@ -464,22 +498,7 @@ func main() {
 				// which is what keeps steep slopes from snapping/flickering.
 				subDt := tickRate.Seconds() / 4
 				for ss := 0; ss < 4; ss++ {
-					lo := ball.X - ball.Radius - 4
-					hi := ball.X + ball.Radius + 4
-					var nearby []physics.Edge
-					for _, e := range terrainEdges {
-						// Use min/max so edges going right→left (e.g. the bottom
-						// face of a CW-wound platform polygon) are not skipped.
-						xMin, xMax := e.X0, e.X1
-						if xMin > xMax {
-							xMin, xMax = xMax, xMin
-						}
-						if xMax < lo || xMin > hi {
-							continue
-						}
-						nearby = append(nearby, e)
-					}
-					ball.Tick(subDt, nearby, 0, hole.WorldW, 0)
+					ball.Tick(subDt, nearbyEdges(), 0, hole.WorldW, 0)
 
 					// Bunker: the rim is now a real physics surface (edges added in
 					// rebuildEdges), so the ball naturally bounces/rests on it via
@@ -518,9 +537,9 @@ func main() {
 						penaltyX = hit.r + waterPenaltyOffset
 					}
 					penaltyY = cty(penaltyX) - ball.Radius
-					sinkEntryX, sinkEntryY = ball.X, ball.Y
-					ball.VX, ball.VY = 0, 0
-					sinkTicks = sinkTotalTicks
+					// Let the ball keep its momentum into the water; the submerged
+					// branch damps it. sinkTicks runs the 5s underwater phase.
+					sinkTicks = waterSinkTicks
 					emit(eventMsg{Type: "event", Event: "enteredWater", X: ball.X, Y: ball.Y})
 					state = ballState{X: ball.X, Y: ball.Y, Resting: false, InWater: true}
 				} else if overHole && ball.Y > cty(hole.HoleX) {
@@ -900,6 +919,7 @@ func main() {
 				Victory  string  `json:"victory"`
 				VX       float64 `json:"vx"`
 				VY       float64 `json:"vy"`
+				Club     string  `json:"club"`
 			}
 			if json.Unmarshal(data, &msg) != nil {
 				continue
@@ -976,7 +996,7 @@ func main() {
 					roomMgr.BeginMatch(roomID, holes)
 				}
 			case "shoot":
-				roomMgr.MatchShoot(pid, msg.VX, msg.VY)
+				roomMgr.MatchShoot(pid, msg.VX, msg.VY, msg.Club)
 			case "matchReturn":
 				roomMgr.MatchReturn(pid)
 			}

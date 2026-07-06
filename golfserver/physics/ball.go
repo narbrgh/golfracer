@@ -32,7 +32,7 @@ func DefaultTunables() Tunables {
 		RollingFriction:    200.0,
 		StaticFriction:     400.0,
 		RestSpeedThreshold: 8.0,
-		BunkerFriction:     4.0,
+		BunkerFriction:     800.0, // px/s² — sand grabs hard (4× grass's RollingFriction) so the ball doesn't roll far
 		DriverPenalty:      0.25,
 		WedgePenalty:       0.7,
 		PutterPenalty:      0.5,

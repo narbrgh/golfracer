@@ -28,12 +28,23 @@ const SPINS: Spin[] = ['back', 'none', 'top']
 const CLUB_LABEL: Record<Club, string> = { driver: 'D', wedge: 'PW', putter: 'P' }
 const SPIN_LABEL: Record<Spin, string> = { back: 'BS', none: 'NS', top: 'TS' }
 
-// Max launch speed per club, px/s. Driver matches the server's maxShotSpeed
-// (MAX_DRAG * POWER_SCALE = 1500); wedge/putter are rough fractions of it.
+// Max launch speed per club, px/s. Tuned for a more golf-like feel.
+// NOTE: the multiplayer server still clamps shots to maxShotSpeed=1500
+// (rooms/match.go), so driver shots there are capped until that constant is
+// raised to match; single-player (main.go) does not cap, so full speeds apply.
 // Mutable and exported so the Ken debug menu can retune club distance live;
 // DEFAULT_CLUB_MAX_SPEED is the fixed reference it resets to / labels as "default".
-export const DEFAULT_CLUB_MAX_SPEED: Record<Club, number> = { driver: 1500, wedge: 930, putter: 420 }
+export const DEFAULT_CLUB_MAX_SPEED: Record<Club, number> = { driver: 2000, wedge: 1500, putter: 450 }
 export const CLUB_MAX_SPEED: Record<Club, number> = { ...DEFAULT_CLUB_MAX_SPEED }
+
+// Shot-power multiplier applied when the ball is shot while sitting on/in a
+// bunker (0-1). The SERVER is authoritative and applies these to the launch
+// velocity (single-player main.go "shoot" handler; multiplayer applyShoot); the
+// client mirrors them here so the shot-prediction arc and the HUD % readout
+// match. Keep in sync with physics.Config defaults (driver 0.25 / wedge 0.7 /
+// putter 0.5) — the Ken menu tunes the server copy.
+export const DEFAULT_CLUB_BUNKER_PENALTY: Record<Club, number> = { driver: 0.25, wedge: 0.7, putter: 0.5 }
+export const CLUB_BUNKER_PENALTY: Record<Club, number> = { ...DEFAULT_CLUB_BUNKER_PENALTY }
 
 const GRAVITY = 1500          // matches golfserver physics.Gravity
 const PUTTER_RAY_LEN = 220    // world px — fixed preview length for the putter's ground ray
@@ -87,6 +98,11 @@ export class SwingEngine {
   meterPct = 0
 
   ballColorHex: string
+
+  // Set by the screen each frame: true when the ball is currently sitting on/in
+  // a bunker. Drives the bunker-penalty % HUD readout and the client's
+  // shot-prediction power (the server applies the real penalty authoritatively).
+  inBunker = false
 
   constructor(cfg: SwingConfig = {}) {
     this.ballColorHex = cfg.ballColorHex ?? '#fff'
@@ -200,7 +216,10 @@ export class SwingEngine {
       return [{ x: ballWx, y: ballWy }, { x: ballWx + dir * PUTTER_RAY_LEN, y: ballWy }]
     }
 
-    const speed = CLUB_MAX_SPEED[this.club]
+    // Preview at max power, reduced by the bunker penalty when applicable so the
+    // arc visibly shrinks when the ball sits in sand (matches the actual shot).
+    let speed = CLUB_MAX_SPEED[this.club]
+    if (this.inBunker) speed *= CLUB_BUNKER_PENALTY[this.club]
     const vx0 = Math.cos(this.aimAngle) * speed, vy0 = Math.sin(this.aimAngle) * speed
     const pts: { x: number; y: number }[] = [{ x: ballWx, y: ballWy }]
     const dt = 1 / 60
@@ -255,6 +274,23 @@ export class SwingEngine {
     CLUBS.forEach((c, i) => drawIcon(L.clubXs[i], CLUB_LABEL[c], this.club === c))
     SPINS.forEach((s, i) => drawIcon(L.spinXs[i], SPIN_LABEL[s], this.spin === s))
 
+    // Bunker penalty readout — shown to the right of the club group while the
+    // ball sits in sand: the selected club's power multiplier as a percentage
+    // (e.g. 25% / 70% / 50%). Sits in the gap between the club and spin groups
+    // (typically ~90px+; the min group gap is 22px so a tight window may crowd
+    // the spin group slightly, acceptable at that extreme).
+    if (this.inBunker) {
+      const pct = Math.round(CLUB_BUNKER_PENALTY[this.club] * 100)
+      const px = L.clubXs[2] + ICON + 8
+      const py = L.iconY + ICON / 2
+      ctx.font = 'bold 15px monospace'
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle'
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'
+      ctx.fillText(`${pct}%`, px + 1, py + 1)     // shadow for legibility over terrain
+      ctx.fillStyle = '#ffcf5c'                    // sandy amber
+      ctx.fillText(`${pct}%`, px, py)
+    }
+
     // Hit! button — outlined white while a swing is in progress.
     const swinging = this.meterPhase !== 'idle'
     ctx.beginPath()
@@ -300,7 +336,11 @@ export class SwingEngine {
   // unused today (no 3rd press yet) — defaults to dead-on.
   getLaunchVelocity(powerPct: number, accuracyOffsetRad = 0): { vx: number; vy: number } {
     const angle = this.aimAngle + accuracyOffsetRad
-    const speed = CLUB_MAX_SPEED[this.club] * clamp(powerPct, 0, 100) / 100
+    let speed = CLUB_MAX_SPEED[this.club] * clamp(powerPct, 0, 100) / 100
+    // Bunker penalty mirrors the server so the predicted arc matches. The server
+    // re-applies it authoritatively from its own bunker check, so a spoofed
+    // client can't dodge it — this is prediction fidelity, not the enforcement.
+    if (this.inBunker) speed *= CLUB_BUNKER_PENALTY[this.club]
     return { vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed }
   }
 }

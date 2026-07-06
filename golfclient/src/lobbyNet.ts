@@ -12,6 +12,7 @@ export interface MatchBall {
   sunk: boolean
   readyInMs: number // ms until this ball can be shot again (shot cooldown)
   penalty: boolean // the cooldown is a water penalty (draw the double ring)
+  inWater: boolean // ball is currently sinking underwater (fade it out)
 }
 
 export interface MatchState {
@@ -154,6 +155,6 @@ export class LobbyNet {
   setCourse(courseId: string): void { this.send({ type: 'setCourse', courseId }) }
   setVictory(victory: string): void { this.send({ type: 'setVictory', victory }) }
   start(): void { this.send({ type: 'start' }) }
-  shoot(vx: number, vy: number): void { this.send({ type: 'shoot', vx, vy }) }
+  shoot(vx: number, vy: number, club: string): void { this.send({ type: 'shoot', vx, vy, club }) }
   matchReturn(): void { this.send({ type: 'matchReturn' }) }
 }
