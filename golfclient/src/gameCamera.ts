@@ -452,13 +452,31 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   const safeEl = root.querySelector<HTMLElement>('[data-safe]')!
 
   // ---- DOM control buttons (portrait) → drive SwingEngine via the screen's opts ----
+  // Fire on POINTERUP, not click. On iOS Safari the first `click` on a DOM button
+  // right after a canvas touch-drag is suppressed (the gesture state from the
+  // touch-action:none canvas hasn't cleared) — so a tap after panning needed two
+  // taps. pointerup isn't subject to that click-suppression. We require the
+  // pointerdown to have landed on the SAME button (tapStart) so a stray drag that
+  // merely ends over a button doesn't trigger it.
+  const onTap = (btn: HTMLElement, fn: () => void) => {
+    let armed = false
+    btn.addEventListener('pointerdown', (e) => { if (e.isPrimary) { armed = true } })
+    btn.addEventListener('pointercancel', () => { armed = false })
+    btn.addEventListener('pointerleave', () => { armed = false })
+    btn.addEventListener('pointerup', (e) => {
+      if (!armed) return
+      armed = false
+      e.preventDefault()
+      fn()
+    })
+  }
   for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-club]'))) {
-    btn.addEventListener('click', () => opts.onClub?.(btn.dataset.club!))
+    onTap(btn, () => opts.onClub?.(btn.dataset.club!))
   }
   for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-spin]'))) {
-    btn.addEventListener('click', () => opts.onSpin?.(btn.dataset.spin!))
+    onTap(btn, () => opts.onSpin?.(btn.dataset.spin!))
   }
-  hitBtnEl.addEventListener('click', () => {
+  onTap(hitBtnEl, () => {
     // In free-look the swing meter can't start (you must be aiming in follow
     // mode). Rather than a confusing no-op, tapping Hit! exits free-look so the
     // next tap starts the swing. The button is greyed while in free-look.
