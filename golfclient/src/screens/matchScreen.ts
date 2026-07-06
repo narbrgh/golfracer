@@ -328,9 +328,19 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     // works whether the frame targets the game canvas (desktop, top-right) or the
     // portrait strip canvas above the square.
     const mc = chrome.portrait && chrome.miniCtx ? chrome.miniCtx : ctx
-    const drawMiniContent = (mwx: (x: number) => number, mwy: (y: number) => number) => {
-      mc.strokeStyle = 'rgba(120,190,130,0.85)'; mc.lineWidth = 1; mc.beginPath()
+    const drawMiniContent = (box: { x: number; y: number; w: number; h: number }, mwx: (x: number) => number, mwy: (y: number) => number) => {
       const stepx = h.worldW / 60
+      // Sky gradient (no sun) + filled terrain, same theme as the main view.
+      const sky = mc.createLinearGradient(0, box.y, 0, box.y + box.h)
+      sky.addColorStop(0, h.theme.skyTop); sky.addColorStop(1, h.theme.skyBottom)
+      mc.save()
+      mc.beginPath(); mc.rect(box.x, box.y, box.w, box.h); mc.clip()
+      mc.fillStyle = sky; mc.fillRect(box.x, box.y, box.w, box.h)
+      mc.beginPath(); mc.moveTo(mwx(0), mwy(tY(0)))
+      for (let x = stepx; x <= h.worldW; x += stepx) mc.lineTo(mwx(x), mwy(tY(x)))
+      mc.lineTo(box.x + box.w, box.y + box.h); mc.lineTo(box.x, box.y + box.h); mc.closePath()
+      mc.fillStyle = h.theme.groundFill; mc.fill()
+      mc.strokeStyle = h.theme.groundLine; mc.lineWidth = 1; mc.beginPath()
       for (let x = 0; x <= h.worldW; x += stepx) { const px = mwx(x), py = mwy(tY(x)); x === 0 ? mc.moveTo(px, py) : mc.lineTo(px, py) }
       mc.stroke()
       mc.fillStyle = 'rgba(47,121,194,0.65)'
@@ -353,6 +363,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         parabolaPts.forEach((p, i) => { const px = mwx(p.x), py = mwy(p.y); i === 0 ? mc.moveTo(px, py) : mc.lineTo(px, py) })
         mc.stroke()
       }
+      mc.restore()
     }
 
     if (chrome.portrait) {
@@ -360,7 +371,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       if (chrome.miniCtx) {
         const b = chrome.miniStripBox()
         chrome.miniCtx.clearRect(0, 0, b.w, b.h)
-        cam.drawMinimapInBox(chrome.miniCtx, b, drawMiniContent)
+        cam.drawMinimapInBox(chrome.miniCtx, b, (mwx, mwy) => drawMiniContent(b, mwx, mwy))
       }
       chrome.setControls({
         club: swing.club, spin: swing.spin,
@@ -368,9 +379,9 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
       })
     } else {
-      cam.drawMinimapFrame(ctx, drawMiniContent)
+      const miniBox = cam.miniBox()
+      cam.drawMinimapFrame(ctx, (mwx, mwy) => drawMiniContent(miniBox, mwx, mwy))
       if (pos) {
-        const miniBox = cam.miniBox()
         const holeDistPx = Math.hypot(h.holeX - pos.x, tY(h.holeX) - pos.y)
         ctx.fillStyle = '#888'; ctx.font = '12px monospace'
         ctx.fillText(`hole: ${formatDistance(holeDistPx)}`, miniBox.x + 2, miniBox.y + miniBox.h + 18)

@@ -385,46 +385,68 @@ function drawSunAndMountains() {
 }
 
 // ---- Minimap ----
-// Shared frame (bg/border/camera-viewport rect) is drawn by cam.drawMinimapFrame;
-// this only renders the single-player-specific content inside it.
-function drawMinimapContent(mwx: (wx: number) => number, mwy: (wy: number) => number, parabolaPts: { x: number; y: number }[] | null, parabolaColor: string) {
-  ctx.strokeStyle = '#556644'; ctx.lineWidth = 1; ctx.beginPath()
-  for (let wx = 0; wx <= hole.worldW; wx += 60) {
-    wx === 0 ? ctx.moveTo(mwx(wx), mwy(tY(wx))) : ctx.lineTo(mwx(wx), mwy(tY(wx)))
-  }
-  ctx.stroke()
+// Renders the single-player minimap content into the given box via the mwx/mwy
+// world→box mappers. `mc` is the TARGET context — the game canvas in overlay
+// mode, or the portrait strip canvas — so it must NOT use the module `ctx`
+// closure (that was the bug where strip content drew onto the game canvas).
+// `box` is the mini box in mc-space; used to fill the sky and close the terrain.
+function drawMinimapContent(mc: CanvasRenderingContext2D, box: { x: number; y: number; w: number; h: number }, mwx: (wx: number) => number, mwy: (wy: number) => number, parabolaPts: { x: number; y: number }[] | null, parabolaColor: string) {
+  // Sky gradient (no sun) — same theme colors as the main view.
+  const sky = mc.createLinearGradient(0, box.y, 0, box.y + box.h)
+  sky.addColorStop(0, hole.theme.skyTop); sky.addColorStop(1, hole.theme.skyBottom)
+  mc.save()
+  mc.beginPath(); mc.rect(box.x, box.y, box.w, box.h); mc.clip()
+  mc.fillStyle = sky; mc.fillRect(box.x, box.y, box.w, box.h)
+
+  // Filled terrain: trace the top edge across the world, then close down the
+  // right/bottom/left of the box so it fills like the real ground.
+  mc.beginPath()
+  mc.moveTo(mwx(0), mwy(tY(0)))
+  for (let wx = 60; wx <= hole.worldW; wx += 60) mc.lineTo(mwx(wx), mwy(tY(wx)))
+  mc.lineTo(mwx(hole.worldW), mwy(tY(hole.worldW)))
+  mc.lineTo(box.x + box.w, box.y + box.h)
+  mc.lineTo(box.x, box.y + box.h)
+  mc.closePath()
+  mc.fillStyle = hole.theme.groundFill; mc.fill()
+  mc.strokeStyle = hole.theme.groundLine; mc.lineWidth = 1
+  mc.beginPath()
+  mc.moveTo(mwx(0), mwy(tY(0)))
+  for (let wx = 60; wx <= hole.worldW; wx += 60) mc.lineTo(mwx(wx), mwy(tY(wx)))
+  mc.stroke()
 
   for (const pool of waterPools) {
     const mx = mwx(pool.left), my = mwy(pool.level)
     const mw = mwx(pool.right) - mx
     const mh = Math.max(mwy(pool.floorY) - my, 2)
-    ctx.fillStyle = 'rgba(22,85,225,0.75)'; ctx.beginPath()
-    ctx.roundRect(mx, my, mw, mh, 1); ctx.fill()
+    mc.fillStyle = 'rgba(22,85,225,0.75)'; mc.beginPath()
+    mc.roundRect(mx, my, mw, mh, 1); mc.fill()
   }
 
   // Bunkers: draw each rim as a sandy line along its spline.
-  ctx.strokeStyle = 'rgba(210,185,100,0.95)'; ctx.lineWidth = 2
+  mc.strokeStyle = 'rgba(210,185,100,0.95)'; mc.lineWidth = 2
   for (const bp of bunkerPools) {
-    ctx.beginPath()
-    ctx.moveTo(mwx(bp.leftX), mwy(splineY(bp.leftX, bp.coeffs)))
-    for (let x = bp.leftX + 20; x <= bp.rightX; x += 20) ctx.lineTo(mwx(x), mwy(splineY(x, bp.coeffs)))
-    ctx.stroke()
+    mc.beginPath()
+    mc.moveTo(mwx(bp.leftX), mwy(splineY(bp.leftX, bp.coeffs)))
+    for (let x = bp.leftX + 20; x <= bp.rightX; x += 20) mc.lineTo(mwx(x), mwy(splineY(x, bp.coeffs)))
+    mc.stroke()
   }
 
-  ctx.fillStyle = '#e44'; ctx.beginPath()
-  ctx.arc(mwx(hole.holeX), mwy(tY(hole.holeX)), 3, 0, Math.PI * 2); ctx.fill()
-  ctx.fillStyle = '#fff'; ctx.beginPath()
-  ctx.arc(mwx(ballX), mwy(ballY), 3, 0, Math.PI * 2); ctx.fill()
+  // Flag (hole) + ball.
+  mc.fillStyle = '#e44'; mc.beginPath()
+  mc.arc(mwx(hole.holeX), mwy(tY(hole.holeX)), 3, 0, Math.PI * 2); mc.fill()
+  mc.fillStyle = '#fff'; mc.strokeStyle = '#000'; mc.lineWidth = 1; mc.beginPath()
+  mc.arc(mwx(ballX), mwy(ballY), 3, 0, Math.PI * 2); mc.fill(); mc.stroke()
 
   if (parabolaPts && parabolaPts.length > 1) {
-    ctx.strokeStyle = parabolaColor; ctx.lineWidth = 1
-    ctx.setLineDash([2, 2])
-    ctx.beginPath()
-    ctx.moveTo(mwx(parabolaPts[0].x), mwy(parabolaPts[0].y))
-    for (let i = 1; i < parabolaPts.length; i++) ctx.lineTo(mwx(parabolaPts[i].x), mwy(parabolaPts[i].y))
-    ctx.stroke()
-    ctx.setLineDash([])
+    mc.strokeStyle = parabolaColor; mc.lineWidth = 1
+    mc.setLineDash([2, 2])
+    mc.beginPath()
+    mc.moveTo(mwx(parabolaPts[0].x), mwy(parabolaPts[0].y))
+    for (let i = 1; i < parabolaPts.length; i++) mc.lineTo(mwx(parabolaPts[i].x), mwy(parabolaPts[i].y))
+    mc.stroke()
+    mc.setLineDash([])
   }
+  mc.restore()
 }
 
 // ---- Draw ----
@@ -578,9 +600,10 @@ function draw() {
     // Portrait: the minimap lives in its own strip canvas above the square, and
     // the swing controls are DOM buttons below it (not drawn on the canvas).
     if (chrome.miniCtx) {
+      const mc = chrome.miniCtx
       const b = chrome.miniStripBox()
-      chrome.miniCtx.clearRect(0, 0, b.w, b.h)
-      cam.drawMinimapInBox(chrome.miniCtx, b, (mwx, mwy) => drawMinimapContent(mwx, mwy, parabolaPts, parabolaColor))
+      mc.clearRect(0, 0, b.w, b.h)
+      cam.drawMinimapInBox(mc, b, (mwx, mwy) => drawMinimapContent(mc, b, mwx, mwy, parabolaPts, parabolaColor))
     }
     chrome.setControls({
       club: swing.club, spin: swing.spin,
@@ -588,8 +611,8 @@ function draw() {
       bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
     })
   } else {
-    cam.drawMinimapFrame(ctx, (mwx, mwy) => drawMinimapContent(mwx, mwy, parabolaPts, parabolaColor))
     const miniBox = cam.miniBox()
+    cam.drawMinimapFrame(ctx, (mwx, mwy) => drawMinimapContent(ctx, miniBox, mwx, mwy, parabolaPts, parabolaColor))
     ctx.fillStyle = '#888'; ctx.font = '12px monospace'
     ctx.fillText(`hole: ${formatDistance(holeDistPx)}`, miniBox.x + 2, miniBox.y + miniBox.h + 18)
     swing.drawHud(ctx, cam.cw, cam.ch, chrome.insets)

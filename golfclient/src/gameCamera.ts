@@ -38,6 +38,10 @@ export class GameCamera {
   camY = 0
   zoom = 1
   mode: CamMode = 'follow'
+  // Resting/idle zoom ceiling. 1 = fill the viewport at rest (desktop). Portrait
+  // mobile sets this below 1 to sit more zoomed OUT (see more of the hole) since
+  // the square shows less horizontally. Also scales the shot auto-zoom's wide end.
+  baseZoom = 1
 
   private worldW = 1
   private worldH = 1
@@ -94,7 +98,7 @@ export class GameCamera {
   exitFreeLook() {
     if (this.mode === 'follow') return
     this.mode = 'follow'
-    this.zoom = 1 // revert to the ball at normal zoom
+    this.zoom = this.baseZoom // revert to the ball at the resting zoom
     this.held.clear()
   }
   toggleFreeLook() { this.mode === 'free' ? this.exitFreeLook() : this.enterFreeLook() }
@@ -165,7 +169,8 @@ export class GameCamera {
         const now = (typeof performance !== 'undefined' ? performance.now() : Date.now())
         const p = clamp((now - this.shotStartMs) / this.shotDurMs, 0, 1)
         const o = this.shotOpenness(p)
-        this.zoom = 1 + (this.shotWideZoom - 1) * o
+        // Interpolate between the resting baseZoom and the wide shot zoom.
+        this.zoom = this.baseZoom + (this.shotWideZoom * this.baseZoom - this.baseZoom) * o
         // Follow the ball, but ease the focus toward mid-flight so the incoming
         // ground ahead is visible while zoomed out.
         const visW = this.cw / this.zoom, visH = this.ch / this.zoom
@@ -192,7 +197,8 @@ export class GameCamera {
       const regionW = Math.max(1, (maxX - minX) * pad)
       const regionH = Math.max(1, (maxY - minY) * pad)
       const fitZoom = Math.min(this.cw / regionW, this.ch / regionH)
-      const targetZoom = clamp(Math.min(1, fitZoom), this.cfg.minZoom, 1)
+      // baseZoom is the resting ceiling (≤1); portrait sits more zoomed out.
+      const targetZoom = clamp(Math.min(this.baseZoom, fitZoom), this.cfg.minZoom, this.baseZoom)
       this.zoom += (targetZoom - this.zoom) * this.cfg.zoomLerp
 
       const visW = this.cw / this.zoom, visH = this.ch / this.zoom
@@ -385,9 +391,9 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     <div class="gc-mini-strip" data-mini-strip><canvas data-mini-canvas></canvas></div>
     <div class="gc-square" data-square>
       <canvas class="gc-canvas"></canvas>
-      <div class="gc-hud" data-hud></div>
+      <div class="gc-hud" data-hud><span data-hud-left></span><span data-hud-right></span></div>
       <div class="free-arrows" data-arrows style="display:none">
-        <div class="free-hint">Free look — Enter, M, Space, or right-click to exit</div>
+        <div class="free-hint"><span class="fh-desktop">Free look — Enter, M, Space, or right-click to exit</span><span class="fh-mobile">Free look mode<br>(Please tap the 🔍 to exit)</span></div>
         <button class="free-arrow fa-up" data-pan="up">▲</button>
         <button class="free-arrow fa-down" data-pan="down">▼</button>
         <button class="free-arrow fa-left" data-pan="left">◀</button>
@@ -433,6 +439,8 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   const meterBallEl = root.querySelector<HTMLElement>('[data-meter-ball]')!
   const hitBtnEl = root.querySelector<HTMLButtonElement>('[data-hit]')!
   const hudEl = root.querySelector<HTMLElement>('[data-hud]')!
+  const hudLeftEl = root.querySelector<HTMLElement>('[data-hud-left]')!
+  const hudRightEl = root.querySelector<HTMLElement>('[data-hud-right]')!
   const arrowsEl = root.querySelector<HTMLElement>('[data-arrows]')!
   const menuToggleEl = root.querySelector<HTMLButtonElement>('[data-menu-toggle]')!
   const menuPanelEl = root.querySelector<HTMLElement>('[data-menu-panel]')!
@@ -591,6 +599,9 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   function resize() {
     portrait = isPortraitMobile()
     root.classList.toggle('gc-portrait', portrait)
+    // Portrait sits ~50% more zoomed out (baseZoom 0.66) so the small square
+    // still shows a useful stretch of the hole; desktop fills at zoom 1.
+    cam.baseZoom = portrait ? 0.66 : 1
 
     let cw: number, ch: number
     if (portrait) {
@@ -656,7 +667,18 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     },
     setHud(text: string | null) {
       hudEl.style.display = text === null ? 'none' : ''
-      if (text !== null) hudEl.textContent = text
+      if (text === null) return
+      // Split "Hole 1/9    ⏱ 2.5s" into a left (hole) and right (time) part so
+      // the pill can span the top with the center free (portrait: the up-arrow
+      // sits in the center gap). The ⏱ marks the boundary.
+      const i = text.indexOf('⏱')
+      if (i >= 0) {
+        hudLeftEl.textContent = text.slice(0, i).trim()
+        hudRightEl.textContent = text.slice(i).trim()
+      } else {
+        hudLeftEl.textContent = text.trim()
+        hudRightEl.textContent = ''
+      }
     },
     setControls(s: ControlsState) {
       if (!portrait) return
