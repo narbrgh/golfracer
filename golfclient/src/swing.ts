@@ -66,7 +66,6 @@ const GROUP_GAP = 22   // gap between the club and spin groups (row 1)
 const BUNKER_W = 40    // reserved slot for the bunker-% readout (between the groups)
 const ROW_GAP = 14     // vertical gap between the two rows
 const BOTTOM_MARGIN = 34 // more room at the bottom (was 18)
-const SIDE_MARGIN = 22   // landscape: distance from the left/right screen edge
 const HIT_W = 58, HIT_H = 44
 const HIT_METER_GAP = 14
 const METER_W = 220   // wider now that it owns its own row
@@ -131,50 +130,9 @@ export class SwingEngine {
 
   private layout(cw: number, ch: number, insets: SafeInsets = ZERO_INSETS): HudLayout {
     const groupW = 3 * ICON + 2 * ICON_GAP
-    // Landscape screens are short: a stacked bottom HUD would run off the top of
-    // the play area and under the gesture bar. So in landscape we move the HUD to
-    // the SIDES — clubs+spin on the left, Hit!+meter on the right — where the tall
-    // dimension gives room. Portrait keeps the two centered bottom rows.
-    const landscape = cw > ch
-
-    if (landscape) {
-      const left = SIDE_MARGIN + insets.left
-      const right = cw - SIDE_MARGIN - insets.right
-      // Left column: clubs row above spin row, vertically centered on screen.
-      const colH = ICON + ROW_GAP + ICON
-      let ly = (ch - colH) / 2
-      const clubXs: number[] = []
-      for (let i = 0; i < 3; i++) clubXs.push(left + i * (ICON + ICON_GAP))
-      const clubY = ly
-      ly += ICON + ROW_GAP
-      const spinXs: number[] = []
-      for (let i = 0; i < 3; i++) spinXs.push(left + i * (ICON + ICON_GAP))
-      const spinY = ly
-      // Bunker % sits just right of the club/spin block, centered vertically.
-      const bunkerX = left + groupW + 10
-      const bunkerY = (clubY + spinY + ICON) / 2 - ICON / 2
-
-      // Right column: Hit! above the meter, vertically centered.
-      const rColH = HIT_H + ROW_GAP + METER_H
-      let ry = (ch - rColH) / 2
-      const hitX = right - HIT_W
-      const hitY = ry
-      ry += HIT_H + ROW_GAP
-      const meterW = METER_W
-      const meterX = right - meterW
-      const meterY = ry + 4
-
-      const hbX = Math.min(clubXs[0], hitX)
-      const hbW = Math.max(spinXs[2] + ICON, right) - hbX
-      const hbY = Math.min(clubY, hitY)
-      const hbH = Math.max(spinY + ICON, meterY + METER_H) - hbY
-      return {
-        clubXs, clubY, spinXs, spinY, bunkerX, bunkerY, hitX, hitY,
-        meterX, meterY, meterW, hitBox: { x: hbX, y: hbY, w: hbW, h: hbH },
-      }
-    }
-
-    // ---- Portrait: two centered bottom rows, lifted above the safe-area. ----
+    // On-canvas HUD (desktop only — mobile portrait uses DOM controls, mobile
+    // landscape shows a rotate prompt): two centered rows at the BOTTOM,
+    // clubs·bunker%·spin over Hit!·meter.
     const row2Y = ch - HIT_H - BOTTOM_MARGIN - insets.bottom
     const row1Y = row2Y - ROW_GAP - ICON
 

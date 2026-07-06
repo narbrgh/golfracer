@@ -296,7 +296,6 @@ export class GameCamera {
    * given ctx; drawContent renders per-screen content via the mwx/mwy mappers. */
   drawMinimapInBox(ctx: CanvasRenderingContext2D, b: { x: number; y: number; w: number; h: number }, drawContent: (mwx: (wx: number) => number, mwy: (wy: number) => number) => void) {
     ctx.fillStyle = 'rgba(8,14,20,0.72)'; ctx.fillRect(b.x, b.y, b.w, b.h)
-    ctx.strokeStyle = 'rgba(246,239,206,0.3)'; ctx.lineWidth = 1; ctx.strokeRect(b.x, b.y, b.w, b.h)
 
     const mwx = (wx: number) => b.x + (wx / this.worldW) * b.w
     const mwy = (wy: number) => b.y + (wy / this.worldH) * b.h
@@ -305,6 +304,11 @@ export class GameCamera {
     const visW = this.cw / this.zoom, visH = this.ch / this.zoom
     ctx.strokeStyle = 'rgba(246,239,206,0.75)'; ctx.lineWidth = 1
     ctx.strokeRect(mwx(this.camX), mwy(this.camY), (visW / this.worldW) * b.w, (visH / this.worldH) * b.h)
+
+    // Black outline drawn LAST so the sky/terrain fill (which clips to the box)
+    // doesn't paint over it. Inset half a line width so it's fully inside the box.
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 2
+    ctx.strokeRect(b.x + 1, b.y + 1, b.w - 2, b.h - 2)
   }
 }
 
