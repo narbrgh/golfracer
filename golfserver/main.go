@@ -18,6 +18,11 @@ import (
 	"golf01/server/terrain"
 )
 
+// version identifies the running build. Set at build time via
+//   -ldflags "-X main.version=<git-hash>-<timestamp>"
+// (see golfserver/deploy.sh). Defaults to "dev" for local `go run`.
+var version = "dev"
+
 const (
 	tickRate   = time.Second / 60
 	listenAddr = ":8081"
@@ -751,6 +756,17 @@ func main() {
 		hdr.Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 		hdr.Set("Access-Control-Allow-Headers", "Content-Type")
 	}
+
+	// GET /version — reports the running build id. The client hits this on the
+	// main menu both to display the server version and as a liveness check (a
+	// failed fetch = server shown offline).
+	http.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		cors(w)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		writeJSON(w, map[string]string{"version": version})
+	})
 
 	// GET /courses — list saved courses (metadata only).
 	http.HandleFunc("/courses", func(w http.ResponseWriter, r *http.Request) {

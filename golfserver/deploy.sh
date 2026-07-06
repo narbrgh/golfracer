@@ -61,9 +61,14 @@ die()  { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 [[ -f "$PEM_KEY" ]] || die "PEM key not found: $PEM_KEY (edit PEM_KEY in this script)"
 
 # 1. Build ───────────────────────────────────────────────────────────────────
-log "Building ${BIN_NAME} for ${GOOS_TARGET}/${GOARCH_TARGET}…"
+# Stamp the binary with a version = git short hash (+ -dirty) + build date, so
+# the /version endpoint and the client's main-menu footer can report it.
+GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+[[ -n "$(git status --porcelain 2>/dev/null)" ]] && GIT_HASH="${GIT_HASH}-dirty"
+VERSION="${GIT_HASH} ($(date -u +%Y-%m-%d\ %H:%M))"
+log "Building ${BIN_NAME} for ${GOOS_TARGET}/${GOARCH_TARGET} — version: ${VERSION}"
 CGO_ENABLED=0 GOOS="$GOOS_TARGET" GOARCH="$GOARCH_TARGET" \
-  go build -trimpath -ldflags="-s -w" -o "$LOCAL_BIN" .
+  go build -trimpath -ldflags="-s -w -X 'main.version=${VERSION}'" -o "$LOCAL_BIN" .
 ok "Built $(du -h "$LOCAL_BIN" | cut -f1) → $LOCAL_BIN"
 
 # 2. Upload to a temp path ───────────────────────────────────────────────────

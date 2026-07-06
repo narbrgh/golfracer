@@ -1,5 +1,6 @@
 import './mainMenu.css'
 import type { Screen } from './screenManager'
+import { CLIENT_VERSION, fetchServerStatus } from '../version'
 
 export interface MainMenuHandlers {
   onSinglePlayer: () => void
@@ -53,24 +54,12 @@ function heroSvg(): string {
     </svg>`
 }
 
-let buildNumber = 1
-function getBuildNumber(): number {
-  const stored = localStorage.getItem('buildNumber')
-  if (stored) buildNumber = parseInt(stored, 10)
-  return buildNumber
-}
-export function incrementBuildNumber(): void {
-  buildNumber++
-  localStorage.setItem('buildNumber', buildNumber.toString())
-}
-
 export function createMainMenu(handlers: MainMenuHandlers): Screen {
   return {
     id: 'mainMenu',
     mount() {
       const root = document.createElement('div')
       root.className = 'screen main-menu'
-      const currentBuild = getBuildNumber()
       root.innerHTML = `
         <div class="mm-frame">
           ${heroSvg()}
@@ -80,12 +69,29 @@ export function createMainMenu(handlers: MainMenuHandlers): Screen {
             <button class="mm-btn mm-editor" type="button" data-action="editor">Map Editor</button>
           </div>
         </div>
-        <div class="mm-build-number">Build #${currentBuild}</div>`
+        <div class="mm-versions">
+          <div class="mm-ver mm-ver-client">client ${CLIENT_VERSION}</div>
+          <div class="mm-ver mm-ver-server mm-ver-checking" data-role="server">server checking…</div>
+        </div>`
       const on = (action: string, fn: () => void) =>
         root.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)!.addEventListener('click', fn)
       on('single', handlers.onSinglePlayer)
       on('online', handlers.onOnline)
       on('editor', handlers.onEditor)
+
+      // Ping the server for its version; the result colors the line (green =
+      // online, red = offline) and doubles as an at-a-glance liveness check.
+      const serverEl = root.querySelector<HTMLDivElement>('[data-role="server"]')!
+      fetchServerStatus().then((s) => {
+        serverEl.classList.remove('mm-ver-checking')
+        if (s.online) {
+          serverEl.classList.add('mm-ver-online')
+          serverEl.textContent = `server ${s.version}`
+        } else {
+          serverEl.classList.add('mm-ver-offline')
+          serverEl.textContent = 'server offline'
+        }
+      })
       return root
     },
   }

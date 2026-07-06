@@ -139,6 +139,8 @@ function updateHole(h: Hole) {
   cam.setWorld(h.worldW, h.worldH)
   cam.centerOn(h.teeBackX, tY(h.teeBackX))
   holeStartMs = Date.now()
+  // Each hole starts with the driver, no spin, aimed 45° toward the hole.
+  swing.resetForHole(h.holeX, h.teeBackX)
 }
 
 // advanceHole moves single-player play to the next hole after a sink, wrapping

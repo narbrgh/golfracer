@@ -569,6 +569,8 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       myWasMoving = false; cam.endShot()
       cam.setWorld(hole.worldW, hole.worldH)
       cam.centerOn(hole.teeBackX, tY(hole.teeBackX))
+      // Each hole starts with the driver, no spin, aimed 45° toward the hole.
+      swing.resetForHole(hole.holeX, hole.teeBackX)
     },
     setState(m) {
       state = m

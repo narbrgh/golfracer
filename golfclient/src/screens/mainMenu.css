@@ -60,12 +60,29 @@
 .mm-online { background: var(--sea-3); }
 .mm-editor { background: var(--sun-3); }
 
-.mm-build-number {
+.mm-versions {
   position: absolute;
   bottom: 16px;
   right: 16px;
   font-size: 12px;
+  font-family: ui-monospace, monospace;
+  text-align: right;
+  line-height: 1.5;
+}
+.mm-ver-client {
   color: var(--ink);
   opacity: 0.5;
-  font-family: ui-monospace, monospace;
 }
+.mm-ver-server::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: currentColor;
+}
+.mm-ver-checking { color: var(--ink); opacity: 0.5; }
+.mm-ver-online   { color: #1a9b4a; }   /* green — server reachable */
+.mm-ver-offline  { color: #d23b3b; }   /* red — server down */

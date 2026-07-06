@@ -108,6 +108,15 @@ export class SwingEngine {
     this.ballColorHex = cfg.ballColorHex ?? '#fff'
   }
 
+  // Reset the swing selections at the start of a hole: driver, no spin, and a
+  // 45° launch aimed toward the hole. holeX/ballX pick the horizontal side —
+  // hole to the right → up-and-right (-45°), to the left → up-and-left (-135°).
+  resetForHole(holeX: number, ballX: number): void {
+    this.club = 'driver'
+    this.spin = 'none'
+    this.aimAngle = holeX >= ballX ? -Math.PI / 4 : (-3 * Math.PI) / 4
+  }
+
   private layout(cw: number, ch: number): HudLayout {
     const barTop = ch - HUD_H - BOTTOM_MARGIN
     const iconY = barTop + (HUD_H - ICON) / 2

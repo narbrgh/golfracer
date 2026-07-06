@@ -21,7 +21,7 @@ import (
 const (
 	matchTickRate     = time.Second / 60
 	countdownTicks    = 3 * 60
-	holeCapTicks      = 300 * 60 // per-hole time cap (5 min); unsunk at the cap is a DNF — the full 5 min is added to the player's total (see finishHole)
+	holeCapTicks      = 180 * 60 // per-hole time cap (3 min); unsunk at the cap is a DNF — the full 3 min is added to the player's total (see finishHole)
 	intermissionTicks = 6 * 60
 	resultsTicks      = 25 * 60 // auto-return to lobby if the host never clicks
 	matchBallRadius   = 10.0
@@ -345,6 +345,12 @@ func (mt *Match) simulate() {
 		// and start the double-length shot cooldown (the double ring). No normal
 		// water/hole/settle handling while sinking.
 		if b.sinkTicksLeft > 0 {
+			// Force not-resting while submerged: even after the ball settles on the
+			// lake bottom the physics step marks it Resting, which would let the
+			// owner shoot mid-sink (applyShoot gates on Resting). The ball is only
+			// truly shootable once it's respawned on the bank below.
+			b.ball.Resting = false
+			b.wasResting = false
 			b.sinkTicksLeft--
 			if b.sinkTicksLeft == 0 {
 				b.ball.X, b.ball.Y = b.bankX, b.bankY
