@@ -684,8 +684,12 @@ canvas.addEventListener('pointerdown', (e) => {
     }
   }
 
+  // NOTE: no setPointerCapture here. Capture retargets the pointer to the canvas
+  // and, on touch, makes the browser swallow the FIRST tap after a drag (it goes
+  // to re-focusing off the canvas) — so a tap on a DOM button right after panning
+  // needed two taps. The window-level move/up listeners below already track the
+  // drag even when the finger leaves the canvas, so capture isn't needed.
   function startPanDrag(sx: number, sy: number) {
-    canvas.setPointerCapture(e.pointerId)
     let panLastX = sx, panLastY = sy
     canvas.style.cursor = 'grabbing'
     function onMove(ev: PointerEvent) {
@@ -726,7 +730,7 @@ canvas.addEventListener('pointerdown', (e) => {
   const startSy = chrome.portrait ? az.y : cy
   const preDragAngle = swing.aimAngle
   aiming = true; aimStartSx = startSx; aimStartSy = startSy; aimCurSx = cx; aimCurSy = cy
-  canvas.setPointerCapture(e.pointerId)
+  // (No setPointerCapture — see startPanDrag note; window listeners track the drag.)
 
   function applyAim(mx: number, my: number) {
     aimCurSx = mx; aimCurSy = my

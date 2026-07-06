@@ -532,7 +532,8 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     const box = { x: 0, y: 0, w: miniCanvas.clientWidth, h: miniCanvas.clientHeight }
     const scrub = (ev: PointerEvent) => { const p = stripLocal(ev); cam.miniJumpInBox(p.x, p.y, box) }
     scrub(e)
-    const up = () => {
+    const up = (ev: PointerEvent) => {
+      try { miniCanvas.releasePointerCapture(ev.pointerId) } catch { /* already released */ }
       miniCanvas.removeEventListener('pointermove', scrub)
       miniCanvas.removeEventListener('pointerup', up)
       miniCanvas.removeEventListener('pointercancel', up)

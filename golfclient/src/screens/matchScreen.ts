@@ -537,8 +537,10 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
           }
         }
 
+        // No setPointerCapture — on touch it makes the browser swallow the first
+        // tap after a drag (re-focusing off the canvas), so a tap on a DOM button
+        // right after panning needed two taps. Window listeners track the drag.
         const startPanDrag = (sx: number, sy: number) => {
-          canvas.setPointerCapture(e.pointerId)
           let panLastX = sx, panLastY = sy
           canvas.style.cursor = 'grabbing'
           const onMove = (ev: PointerEvent) => {
@@ -568,7 +570,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         // The aim is set from the drag's start->current point. Firing is via the
         // Hit! meter, not release, so onUp just finalizes the angle.
         if (!canShoot()) return
-        canvas.setPointerCapture(e.pointerId)
+        // (No setPointerCapture — see startPanDrag note; window listeners track it.)
         // On mobile (portrait): anchor the aim origin to the pre-drawn aim circle's
         // center so the slingshot + dead-zone circle stay centered on it. Desktop
         // keeps the click-anywhere press-point origin.
