@@ -35,7 +35,10 @@
       "Bash(node /Users/erikinterval/dev/ts/golf01/golfclient/_verify_swing_tmp.mjs)",
       "Bash(kill 51783)",
       "Bash(lsof -i :8080 -sTCP:LISTEN -n -P)",
-      "Bash(npx vite *)"
+      "Bash(npx vite *)",
+      "Bash(ssh -i ~/.ssh/BotKey02.pem -o ConnectTimeout=10 ubuntu@18.119.220.87 'systemctl show golf -p WorkingDirectory --value; systemctl show golf -p ExecStart --value | grep -oE \"path=[^ ]+\"')",
+      "Bash(rsync -az --no-perms --omit-dir-times -e 'ssh -i /Users/erikinterval/.ssh/BotKey02.pem -o ConnectTimeout=10' ./courses/ ubuntu@18.119.220.87:/home/ubuntu/courses/)",
+      "Bash(ssh -i ~/.ssh/BotKey02.pem -o ConnectTimeout=10 ubuntu@18.119.220.87 'sudo systemctl restart golf && sleep 1 && systemctl is-active golf && echo \"--- API now serves: ---\" && curl -s http://localhost:8081/courses')"
     ]
   }
 }
