@@ -8,6 +8,15 @@
   overflow: hidden;
   background: #050505;
 }
+/* Portrait mobile: square-canvas scrolling page (see gameChrome.css .gc-portrait). */
+@media (pointer: coarse) and (orientation: portrait) {
+  .match-screen {
+    display: block;
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+}
 
 /* Countdown big number */
 .match-countdown {

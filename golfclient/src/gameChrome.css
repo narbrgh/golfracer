@@ -149,3 +149,174 @@
 .fa-down  { bottom: 14px; left: 50%; transform: translateX(-50%); }
 .fa-left  { left: 14px;   top: 50%;  transform: translateY(-50%); }
 .fa-right { right: 14px;  top: 50%;  transform: translateY(-50%); }
+
+/* ============================================================================
+   Desktop / landscape-desktop (default): the .gc-square is a transparent
+   passthrough that fills the wrap; the strip, DOM controls, and rotate overlay
+   are hidden. The canvas + overlay chrome behave exactly as before.
+   ============================================================================ */
+.gc-mini-strip,
+.gc-controls,
+.gc-rotate { display: none; }
+.gc-square { position: relative; display: contents; }
+
+/* ============================================================================
+   Portrait mobile (.gc-portrait on .gc-wrap): square canvas in a normally
+   scrolling page — minimap strip above, DOM controls below.
+   ============================================================================ */
+.gc-wrap.gc-portrait {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 100%;
+  gap: 8px;
+  padding: 8px;
+  box-sizing: border-box;
+}
+.gc-wrap.gc-portrait .gc-mini-strip {
+  display: block;
+  width: 100%;
+  height: 60px;
+  border-radius: 8px;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.gc-wrap.gc-portrait .gc-mini-strip canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+.gc-wrap.gc-portrait .gc-square {
+  display: block;
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #050505;
+}
+.gc-wrap.gc-portrait .gc-square .gc-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+/* The hole/timer pill stays overlaid on the square (top-left). The hamburger +
+   look-toggle stay overlaid bottom-right of the square (safe-area no longer
+   needed here — the square is fully on-screen in the scrolling page). */
+.gc-wrap.gc-portrait .gc-menu {
+  right: 10px;
+  bottom: 10px;
+}
+
+/* ---- DOM control bar (below the square) ---- */
+.gc-controls {
+  display: none;
+}
+.gc-wrap.gc-portrait .gc-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  flex: 0 0 auto;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+}
+.gc-ctl-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.gc-ctl-group { display: flex; gap: 6px; }
+.gc-ctl-btn {
+  min-width: 48px;
+  height: 48px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 2px solid rgba(0, 0, 0, 0.55);
+  background: rgba(128, 128, 128, 0.28);
+  color: #fff;
+  font: 700 15px/1 ui-monospace, monospace;
+  cursor: pointer;
+}
+.gc-ctl-btn.active {
+  border-color: #fff;
+  background: var(--sea-3);
+}
+.gc-ctl-bunker {
+  min-width: 44px;
+  text-align: center;
+  color: #ffcf5c;
+  font: 700 16px/1 ui-monospace, monospace;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  visibility: hidden;
+}
+.gc-ctl-bunker.show { visibility: visible; }
+.gc-ctl-hit {
+  min-width: 72px;
+  height: 52px;
+  border-radius: 10px;
+  border: 2px solid rgba(0, 0, 0, 0.55);
+  background: var(--sea-3);
+  color: #fff;
+  font: 800 18px/1 ui-monospace, monospace;
+  cursor: pointer;
+}
+.gc-ctl-hit.active { border-color: #fff; filter: brightness(1.1); }
+.gc-ctl-meter {
+  position: relative;
+  flex: 1 1 auto;
+  max-width: 340px;
+  height: 26px;
+  border-radius: 13px;
+  border: 2px solid rgba(0, 0, 0, 0.55);
+  background: rgba(128, 128, 128, 0.28);
+  overflow: hidden;
+}
+/* tick marks at 0/50/100 */
+.gc-ctl-meter::before,
+.gc-ctl-meter::after {
+  content: "";
+  position: absolute;
+  top: 3px; bottom: 3px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.gc-ctl-meter::before { left: 50%; }
+.gc-ctl-meter::after { right: 3px; }
+.gc-ctl-meter-ball {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid #000;
+  transform: translate(-50%, -50%);
+}
+
+/* ---- Rotate-to-portrait prompt (coarse pointer + landscape) ---- */
+.gc-rotate {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  color: var(--cream);
+  font: 700 22px/1.4 ui-monospace, monospace;
+  background: #050505;
+}
+@media (pointer: coarse) and (orientation: landscape) {
+  .gc-rotate {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+  }
+  /* Hide the game entirely behind the rotate prompt in landscape-mobile. */
+  .gc-wrap > .gc-square,
+  .gc-wrap > .gc-mini-strip,
+  .gc-wrap > .gc-controls { visibility: hidden; }
+}

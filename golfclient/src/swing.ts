@@ -439,6 +439,12 @@ export class SwingEngine {
     ctx.restore()
   }
 
+  /** True while a swing meter is sweeping (used by DOM controls to highlight Hit!). */
+  isSwinging(): boolean { return this.meterPhase !== 'idle' }
+
+  /** The selected club's bunker-penalty as a percentage (e.g. 25 / 70 / 50). */
+  clubBunkerPct(): number { return CLUB_BUNKER_PENALTY[this.club] * 100 }
+
   // Converts a captured power % (0-100, from pressHit's HitResult) into a
   // launch velocity at the current club/aimAngle. accuracyOffsetRad is
   // unused today (no 3rd press yet) — defaults to dead-on.

@@ -179,6 +179,11 @@ const chrome = mountGameChrome(host, cam, {
     { label: 'Ken', onClick: () => opts.onKen?.(), style: 'background: #ff9900' },
     { label: 'Back to Menu', onClick: () => opts.onBack?.() },
   ],
+  // Portrait-mobile DOM controls drive the same SwingEngine as the keyboard
+  // shortcuts / on-canvas HUD taps.
+  onHit: () => pressHitShortcut(),
+  onClub: (c) => { swing.club = c as typeof swing.club },
+  onSpin: (s) => { swing.spin = s as typeof swing.spin },
 })
 const canvas = chrome.canvas
 const ctx = chrome.ctx
@@ -568,13 +573,27 @@ function draw() {
     ctx.textAlign = 'left'
   }
 
-  cam.drawMinimapFrame(ctx, (mwx, mwy) => drawMinimapContent(mwx, mwy, parabolaPts, parabolaColor))
-  const miniBox = cam.miniBox()
   const holeDistPx = Math.hypot(hole.holeX - ballX, tY(hole.holeX) - ballY)
-  ctx.fillStyle = '#888'; ctx.font = '12px monospace'
-  ctx.fillText(`hole: ${formatDistance(holeDistPx)}`, miniBox.x + 2, miniBox.y + miniBox.h + 18)
-
-  swing.drawHud(ctx, cam.cw, cam.ch, chrome.insets)
+  if (chrome.portrait) {
+    // Portrait: the minimap lives in its own strip canvas above the square, and
+    // the swing controls are DOM buttons below it (not drawn on the canvas).
+    if (chrome.miniCtx) {
+      const b = chrome.miniStripBox()
+      chrome.miniCtx.clearRect(0, 0, b.w, b.h)
+      cam.drawMinimapInBox(chrome.miniCtx, b, (mwx, mwy) => drawMinimapContent(mwx, mwy, parabolaPts, parabolaColor))
+    }
+    chrome.setControls({
+      club: swing.club, spin: swing.spin,
+      meterPct: swing.meterPct, swinging: swing.isSwinging(),
+      bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
+    })
+  } else {
+    cam.drawMinimapFrame(ctx, (mwx, mwy) => drawMinimapContent(mwx, mwy, parabolaPts, parabolaColor))
+    const miniBox = cam.miniBox()
+    ctx.fillStyle = '#888'; ctx.font = '12px monospace'
+    ctx.fillText(`hole: ${formatDistance(holeDistPx)}`, miniBox.x + 2, miniBox.y + miniBox.h + 18)
+    swing.drawHud(ctx, cam.cw, cam.ch, chrome.insets)
+  }
 }
 
 function updateHud() {
@@ -615,29 +634,31 @@ canvas.addEventListener('pointerdown', (e) => {
   const rect = canvas.getBoundingClientRect()
   const cx = e.clientX - rect.left, cy = e.clientY - rect.top
 
-  // Minimap: enter free-look and scrub the camera by clicking/dragging on it.
-  if (cam.miniHit(cx, cy)) {
-    cam.enterFreeLook()
-    chrome.sync()
-    cam.miniJump(cx, cy)
-    function onMiniMove(ev: PointerEvent) {
-      const r = canvas.getBoundingClientRect(); cam.miniJump(ev.clientX - r.left, ev.clientY - r.top)
+  // Portrait: the minimap (strip canvas) and the swing controls (DOM buttons)
+  // live outside this canvas, so skip their on-canvas hit-tests entirely — a
+  // press here is only ever an aim (inside the circle) or a pan.
+  if (!chrome.portrait) {
+    // Minimap: enter free-look and scrub the camera by clicking/dragging on it.
+    if (cam.miniHit(cx, cy)) {
+      cam.enterFreeLook()
+      chrome.sync()
+      cam.miniJump(cx, cy)
+      const onMiniMove = (ev: PointerEvent) => {
+        const r = canvas.getBoundingClientRect(); cam.miniJump(ev.clientX - r.left, ev.clientY - r.top)
+      }
+      const onMiniUp = () => {
+        window.removeEventListener('pointermove', onMiniMove); window.removeEventListener('pointerup', onMiniUp); window.removeEventListener('pointercancel', onMiniUp)
+      }
+      window.addEventListener('pointermove', onMiniMove); window.addEventListener('pointerup', onMiniUp); window.addEventListener('pointercancel', onMiniUp)
+      return
     }
-    function onMiniUp() {
-      window.removeEventListener('pointermove', onMiniMove); window.removeEventListener('pointerup', onMiniUp); window.removeEventListener('pointercancel', onMiniUp)
-    }
-    window.addEventListener('pointermove', onMiniMove); window.addEventListener('pointerup', onMiniUp); window.addEventListener('pointercancel', onMiniUp)
-    return
-  }
 
-  const hud = swing.hitTestHud(cx, cy, cam.cw, cam.ch, chrome.insets)
-  if (hud) {
-    if (hud === 'hit') {
-      pressHitShortcut()
-    } else {
-      swing.handleHudClick(hud)
+    const hud = swing.hitTestHud(cx, cy, cam.cw, cam.ch, chrome.insets)
+    if (hud) {
+      if (hud === 'hit') pressHitShortcut()
+      else swing.handleHudClick(hud)
+      return
     }
-    return
   }
 
   function startPanDrag(sx: number, sy: number) {

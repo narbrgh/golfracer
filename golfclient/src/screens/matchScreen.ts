@@ -324,44 +324,60 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       ctx.setLineDash([])
     }
 
-    cam.drawMinimapFrame(ctx, (mwx, mwy) => {
-      ctx.strokeStyle = 'rgba(120,190,130,0.85)'; ctx.lineWidth = 1; ctx.beginPath()
+    // Minimap content, renderer-agnostic (draws via the mwx/mwy mappers) so it
+    // works whether the frame targets the game canvas (desktop, top-right) or the
+    // portrait strip canvas above the square.
+    const mc = chrome.portrait && chrome.miniCtx ? chrome.miniCtx : ctx
+    const drawMiniContent = (mwx: (x: number) => number, mwy: (y: number) => number) => {
+      mc.strokeStyle = 'rgba(120,190,130,0.85)'; mc.lineWidth = 1; mc.beginPath()
       const stepx = h.worldW / 60
-      for (let x = 0; x <= h.worldW; x += stepx) { const px = mwx(x), py = mwy(tY(x)); x === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py) }
-      ctx.stroke()
-      ctx.fillStyle = 'rgba(47,121,194,0.65)'
-      for (const p of waterPools) ctx.fillRect(mwx(p.left), mwy(p.level), Math.max(2, mwx(p.right) - mwx(p.left)), 3)
-      // Bunkers: sandy rim line along each bunker's spline.
-      ctx.strokeStyle = 'rgba(210,185,100,0.95)'; ctx.lineWidth = 2
+      for (let x = 0; x <= h.worldW; x += stepx) { const px = mwx(x), py = mwy(tY(x)); x === 0 ? mc.moveTo(px, py) : mc.lineTo(px, py) }
+      mc.stroke()
+      mc.fillStyle = 'rgba(47,121,194,0.65)'
+      for (const p of waterPools) mc.fillRect(mwx(p.left), mwy(p.level), Math.max(2, mwx(p.right) - mwx(p.left)), 3)
+      mc.strokeStyle = 'rgba(210,185,100,0.95)'; mc.lineWidth = 2
       for (const bk of bunkerPools) {
-        ctx.beginPath()
-        ctx.moveTo(mwx(bk.leftX), mwy(splineY(bk.leftX, bk.coeffs)))
-        for (let x = bk.leftX + 20; x <= bk.rightX; x += 20) ctx.lineTo(mwx(x), mwy(splineY(x, bk.coeffs)))
-        ctx.stroke()
+        mc.beginPath()
+        mc.moveTo(mwx(bk.leftX), mwy(splineY(bk.leftX, bk.coeffs)))
+        for (let x = bk.leftX + 20; x <= bk.rightX; x += 20) mc.lineTo(mwx(x), mwy(splineY(x, bk.coeffs)))
+        mc.stroke()
       }
-      ctx.fillStyle = '#e44'; ctx.beginPath(); ctx.arc(mwx(h.holeX), mwy(tY(h.holeX)), 2, 0, Math.PI * 2); ctx.fill()
+      mc.fillStyle = '#e44'; mc.beginPath(); mc.arc(mwx(h.holeX), mwy(tY(h.holeX)), 2, 0, Math.PI * 2); mc.fill()
       if (state) for (const b of state.balls) {
         if (b.sunk) continue
         const rp = render.get(b.playerId) ?? { x: b.x, y: b.y }
-        ctx.fillStyle = colorHex(b.color); ctx.beginPath(); ctx.arc(mwx(rp.x), mwy(rp.y), 2.5, 0, Math.PI * 2); ctx.fill()
+        mc.fillStyle = colorHex(b.color); mc.beginPath(); mc.arc(mwx(rp.x), mwy(rp.y), 2.5, 0, Math.PI * 2); mc.fill()
       }
       if (parabolaPts) {
-        ctx.strokeStyle = parabolaColor; ctx.lineWidth = 1; ctx.beginPath()
-        parabolaPts.forEach((p, i) => { const px = mwx(p.x), py = mwy(p.y); i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py) })
-        ctx.stroke()
+        mc.strokeStyle = parabolaColor; mc.lineWidth = 1; mc.beginPath()
+        parabolaPts.forEach((p, i) => { const px = mwx(p.x), py = mwy(p.y); i === 0 ? mc.moveTo(px, py) : mc.lineTo(px, py) })
+        mc.stroke()
       }
-    })
-
-    // Distance-to-hole readout under the minimap (matches single-player).
-    if (pos) {
-      const miniBox = cam.miniBox()
-      const holeDistPx = Math.hypot(h.holeX - pos.x, tY(h.holeX) - pos.y)
-      ctx.fillStyle = '#888'; ctx.font = '12px monospace'
-      ctx.fillText(`hole: ${formatDistance(holeDistPx)}`, miniBox.x + 2, miniBox.y + miniBox.h + 18)
     }
 
-    // Swing HUD (club/spin selectors + Hit! meter), drawn last, screen space.
-    swing.drawHud(ctx, cam.cw, cam.ch, chrome.insets)
+    if (chrome.portrait) {
+      // Portrait: minimap → strip canvas; controls → DOM below the square.
+      if (chrome.miniCtx) {
+        const b = chrome.miniStripBox()
+        chrome.miniCtx.clearRect(0, 0, b.w, b.h)
+        cam.drawMinimapInBox(chrome.miniCtx, b, drawMiniContent)
+      }
+      chrome.setControls({
+        club: swing.club, spin: swing.spin,
+        meterPct: swing.meterPct, swinging: swing.isSwinging(),
+        bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
+      })
+    } else {
+      cam.drawMinimapFrame(ctx, drawMiniContent)
+      if (pos) {
+        const miniBox = cam.miniBox()
+        const holeDistPx = Math.hypot(h.holeX - pos.x, tY(h.holeX) - pos.y)
+        ctx.fillStyle = '#888'; ctx.font = '12px monospace'
+        ctx.fillText(`hole: ${formatDistance(holeDistPx)}`, miniBox.x + 2, miniBox.y + miniBox.h + 18)
+      }
+      // Swing HUD (club/spin selectors + Hit! meter), drawn last, screen space.
+      swing.drawHud(ctx, cam.cw, cam.ch, chrome.insets)
+    }
   }
 
   function tick() {
@@ -466,6 +482,9 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         menuItems: [
           { label: 'Leave Game', onClick: () => handlers.onLeave() },
         ],
+        onHit: () => fireHit(),
+        onClub: (c) => { swing.club = c as typeof swing.club },
+        onSpin: (s) => { swing.spin = s as typeof swing.spin },
       })
       canvas = chrome.canvas
       ctx = chrome.ctx
@@ -484,23 +503,27 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         if (e.button !== 0) return
         if (!e.isPrimary) return // second touch drives pinch-zoom (mountGameChrome)
         const p = screenPos(e)
-        // Minimap: enter free-look and scrub the camera by clicking/dragging on it.
-        if (cam.miniHit(p.x, p.y)) {
-          cam.enterFreeLook()
-          chrome.sync()
-          cam.miniJump(p.x, p.y)
-          const onMove = (ev: PointerEvent) => { const q = screenPos(ev); cam.miniJump(q.x, q.y) }
-          const onUp = () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp) }
-          window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp)
-          return
-        }
-        // Swing HUD (club/spin selectors + Hit! button) — hit-tested before the
-        // free-look/aim branches so the controls work in either camera mode.
-        const hud = swing.hitTestHud(p.x, p.y, cam.cw, cam.ch, chrome.insets)
-        if (hud) {
-          if (hud === 'hit') fireHit()
-          else swing.handleHudClick(hud)
-          return
+        // Portrait: minimap (strip canvas) + controls (DOM) live outside this
+        // canvas, so skip their on-canvas hit-tests — a press here is aim or pan.
+        if (!chrome.portrait) {
+          // Minimap: enter free-look and scrub the camera by clicking/dragging on it.
+          if (cam.miniHit(p.x, p.y)) {
+            cam.enterFreeLook()
+            chrome.sync()
+            cam.miniJump(p.x, p.y)
+            const onMove = (ev: PointerEvent) => { const q = screenPos(ev); cam.miniJump(q.x, q.y) }
+            const onUp = () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp) }
+            window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp)
+            return
+          }
+          // Swing HUD (club/spin selectors + Hit! button) — hit-tested before the
+          // free-look/aim branches so the controls work in either camera mode.
+          const hud = swing.hitTestHud(p.x, p.y, cam.cw, cam.ch, chrome.insets)
+          if (hud) {
+            if (hud === 'hit') fireHit()
+            else swing.handleHudClick(hud)
+            return
+          }
         }
 
         const startPanDrag = (sx: number, sy: number) => {

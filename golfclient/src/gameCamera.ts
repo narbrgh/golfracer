@@ -261,7 +261,7 @@ export class GameCamera {
   }
   onKeyUp(e: KeyboardEvent) { this.held.delete(e.key) }
 
-  // ---- Minimap (top-right) ----
+  // ---- Minimap (top-right corner of the game canvas — desktop/overlay mode) ----
   miniBox(w = 200, h = 52, pad = 12) { return { x: this.cw - w - pad, y: pad, w, h } }
 
   miniHit(px: number, py: number): boolean {
@@ -269,18 +269,26 @@ export class GameCamera {
     return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h
   }
 
-  miniJump(px: number, py: number) {
-    const b = this.miniBox()
-    const wx = ((px - b.x) / b.w) * this.worldW
-    const wy = ((py - b.y) / b.h) * this.worldH
+  miniJump(px: number, py: number) { this.miniJumpInBox(px, py, this.miniBox()) }
+
+  /** Draws the shared minimap frame into the game canvas's top-right corner. */
+  drawMinimapFrame(ctx: CanvasRenderingContext2D, drawContent: (mwx: (wx: number) => number, mwy: (wy: number) => number) => void) {
+    this.drawMinimapInBox(ctx, this.miniBox(), drawContent)
+  }
+
+  // ---- Generalized minimap (any box) — reused by the portrait strip canvas ----
+  /** Scrubs the camera so a tap at strip/box-local (px,py) recenters on that world point. */
+  miniJumpInBox(px: number, py: number, box: { x: number; y: number; w: number; h: number }) {
+    const wx = ((px - box.x) / box.w) * this.worldW
+    const wy = ((py - box.y) / box.h) * this.worldH
     this.camX = wx - this.cw / this.zoom / 2
     this.camY = wy - this.ch / this.zoom / 2
     this.clampCam()
   }
 
-  /** Draws the shared minimap frame (bg/border/camera-viewport rect); drawContent renders per-screen content in between. */
-  drawMinimapFrame(ctx: CanvasRenderingContext2D, drawContent: (mwx: (wx: number) => number, mwy: (wy: number) => number) => void) {
-    const b = this.miniBox()
+  /** Draws the minimap frame (bg/border/camera-rect) into an arbitrary box of the
+   * given ctx; drawContent renders per-screen content via the mwx/mwy mappers. */
+  drawMinimapInBox(ctx: CanvasRenderingContext2D, b: { x: number; y: number; w: number; h: number }, drawContent: (mwx: (wx: number) => number, mwy: (wy: number) => number) => void) {
     ctx.fillStyle = 'rgba(8,14,20,0.72)'; ctx.fillRect(b.x, b.y, b.w, b.h)
     ctx.strokeStyle = 'rgba(246,239,206,0.3)'; ctx.lineWidth = 1; ctx.strokeRect(b.x, b.y, b.w, b.h)
 
@@ -300,6 +308,16 @@ export interface ChromeMenuItem { label: string; onClick: () => void; style?: st
  * (notch, home-indicator/gesture bar, rounded corners). Read from a CSS probe. */
 export interface SafeInsets { top: number; right: number; bottom: number; left: number }
 
+/** Live state the DOM control bar reflects (portrait mobile). Selected club/spin
+ * highlight, the power-meter fill, and the bunker-penalty readout. */
+export interface ControlsState {
+  club: string
+  spin: string
+  meterPct: number
+  swinging: boolean
+  bunkerPct: number | null
+}
+
 export interface GameChromeHandle {
   root: HTMLElement
   canvas: HTMLCanvasElement
@@ -307,8 +325,17 @@ export interface GameChromeHandle {
   /** Current safe-area insets in CSS px; refreshed on resize. Mutated in place,
    * so callers can hold the reference and read the live values each frame. */
   insets: SafeInsets
+  /** True when the portrait-mobile layout (square canvas + DOM controls) is
+   * active — screens use it to skip the on-canvas HUD and render the strip minimap. */
+  portrait: boolean
+  /** Portrait only: the minimap strip's own 2D context (null in overlay mode). */
+  miniCtx: CanvasRenderingContext2D | null
+  /** Portrait only: the strip minimap box in strip-canvas CSS px (full strip). */
+  miniStripBox(): { x: number; y: number; w: number; h: number }
   /** Sets the top-left hole/timer HUD text; null hides the pill entirely. */
   setHud(text: string | null): void
+  /** Portrait only: push live control state into the DOM control bar. No-op in overlay mode. */
+  setControls(s: ControlsState): void
   /**
    * Reflects cam.mode into the arrows/cursor DOM. Call after any of *your own*
    * input handling that might have changed cam.mode (minimap click, keydown) —
@@ -323,43 +350,103 @@ export interface GameChromeHandle {
   toggleMenu(): void
 }
 
+// True when we should use the portrait-mobile layout (square canvas in a
+// scrolling page + DOM controls) rather than the desktop full-viewport overlay.
+function isPortraitMobile(): boolean {
+  if (typeof window.matchMedia !== 'function') return false
+  return window.matchMedia('(pointer: coarse)').matches &&
+    window.matchMedia('(orientation: portrait)').matches
+}
+
 // Builds the wrap/canvas/hud/free-look-arrows/hamburger-menu DOM shared by
 // both screens (see gameChrome.css), and wires it to a GameCamera instance.
+//
+// Two layouts share this one function and the same GameCamera/SwingEngine:
+//  - Desktop / landscape-desktop: canvas fills the viewport, HUD + minimap are
+//    drawn ON the canvas, chrome (pill/arrows/menu) is absolutely overlaid.
+//  - Portrait mobile: a square game canvas sits in a NORMALLY SCROLLING page,
+//    with a minimap strip canvas above it and real DOM control buttons below.
+//    (squigglegolf pattern — stops fighting the mobile address bar.)
 export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   menuItems: ChromeMenuItem[]
   minW?: number
   minH?: number
+  /** Portrait controls fire these; the screen owns launch/prediction wiring. */
+  onHit?: () => void
+  onClub?: (club: string) => void
+  onSpin?: (spin: string) => void
 }): GameChromeHandle {
   const minW = opts.minW ?? 900, minH = opts.minH ?? 560
 
   const root = document.createElement('div')
   root.className = 'gc-wrap'
   root.innerHTML = `
-    <canvas class="gc-canvas"></canvas>
-    <div class="gc-safe-probe" data-safe></div>
-    <div class="gc-hud" data-hud></div>
-    <div class="free-arrows" data-arrows style="display:none">
-      <div class="free-hint">Free look — Enter, M, Space, or right-click to exit</div>
-      <button class="free-arrow fa-up" data-pan="up">▲</button>
-      <button class="free-arrow fa-down" data-pan="down">▼</button>
-      <button class="free-arrow fa-left" data-pan="left">◀</button>
-      <button class="free-arrow fa-right" data-pan="right">▶</button>
+    <div class="gc-rotate" data-rotate>Please rotate your phone to portrait to play ⛳</div>
+    <div class="gc-mini-strip" data-mini-strip><canvas data-mini-canvas></canvas></div>
+    <div class="gc-square" data-square>
+      <canvas class="gc-canvas"></canvas>
+      <div class="gc-hud" data-hud></div>
+      <div class="free-arrows" data-arrows style="display:none">
+        <div class="free-hint">Free look — Enter, M, Space, or right-click to exit</div>
+        <button class="free-arrow fa-up" data-pan="up">▲</button>
+        <button class="free-arrow fa-down" data-pan="down">▼</button>
+        <button class="free-arrow fa-left" data-pan="left">◀</button>
+        <button class="free-arrow fa-right" data-pan="right">▶</button>
+      </div>
+      <div class="gc-menu">
+        <button class="gc-look-toggle" data-look-toggle aria-label="Free look">🔍</button>
+        <button class="gc-menu-toggle" data-menu-toggle aria-label="Menu">☰</button>
+        <div class="gc-menu-panel" data-menu-panel style="display:none"></div>
+      </div>
     </div>
-    <div class="gc-menu">
-      <button class="gc-look-toggle" data-look-toggle aria-label="Free look">🔍</button>
-      <button class="gc-menu-toggle" data-menu-toggle aria-label="Menu">☰</button>
-      <div class="gc-menu-panel" data-menu-panel style="display:none"></div>
-    </div>`
+    <div class="gc-controls" data-controls>
+      <div class="gc-ctl-row">
+        <div class="gc-ctl-group" data-club-group>
+          <button class="gc-ctl-btn" data-club="driver">D</button>
+          <button class="gc-ctl-btn" data-club="wedge">PW</button>
+          <button class="gc-ctl-btn" data-club="putter">P</button>
+        </div>
+        <div class="gc-ctl-bunker" data-bunker></div>
+        <div class="gc-ctl-group" data-spin-group>
+          <button class="gc-ctl-btn" data-spin="back">BS</button>
+          <button class="gc-ctl-btn" data-spin="none">NS</button>
+          <button class="gc-ctl-btn" data-spin="top">TS</button>
+        </div>
+      </div>
+      <div class="gc-ctl-row">
+        <button class="gc-ctl-hit" data-hit>Hit!</button>
+        <div class="gc-ctl-meter" data-meter>
+          <div class="gc-ctl-meter-ball" data-meter-ball></div>
+        </div>
+      </div>
+    </div>
+    <div class="gc-safe-probe" data-safe></div>`
   host.appendChild(root)
 
-  const canvas = root.querySelector('canvas')!
+  const squareEl = root.querySelector<HTMLElement>('[data-square]')!
+  const canvas = squareEl.querySelector('canvas')!
   const ctx = canvas.getContext('2d')!
+  const miniCanvas = root.querySelector<HTMLCanvasElement>('[data-mini-canvas]')!
+  const miniCtx = miniCanvas.getContext('2d')
+  const controlsEl = root.querySelector<HTMLElement>('[data-controls]')!
+  const bunkerEl = root.querySelector<HTMLElement>('[data-bunker]')!
+  const meterBallEl = root.querySelector<HTMLElement>('[data-meter-ball]')!
+  const hitBtnEl = root.querySelector<HTMLButtonElement>('[data-hit]')!
   const hudEl = root.querySelector<HTMLElement>('[data-hud]')!
   const arrowsEl = root.querySelector<HTMLElement>('[data-arrows]')!
   const menuToggleEl = root.querySelector<HTMLButtonElement>('[data-menu-toggle]')!
   const menuPanelEl = root.querySelector<HTMLElement>('[data-menu-panel]')!
   const lookToggleEl = root.querySelector<HTMLButtonElement>('[data-look-toggle]')!
   const safeEl = root.querySelector<HTMLElement>('[data-safe]')!
+
+  // ---- DOM control buttons (portrait) → drive SwingEngine via the screen's opts ----
+  for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-club]'))) {
+    btn.addEventListener('click', () => opts.onClub?.(btn.dataset.club!))
+  }
+  for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-spin]'))) {
+    btn.addEventListener('click', () => opts.onSpin?.(btn.dataset.spin!))
+  }
+  hitBtnEl.addEventListener('click', () => opts.onHit?.())
 
   // Live safe-area insets — refreshed in resize() from the probe's resolved
   // env() padding. Mutated in place so the handle's holder sees updates.
@@ -408,6 +495,31 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     lookToggleEl.classList.toggle('active', cam.mode === 'free')
   }
   applySync()
+
+  // ---- Portrait strip minimap: tap/drag to scrub the camera along the hole. ----
+  // (In overlay mode the minimap lives in the game canvas and is handled by the
+  // screens' own pointerdown; the strip is a separate canvas, so wire it here.)
+  const stripLocal = (e: PointerEvent) => {
+    const r = miniCanvas.getBoundingClientRect()
+    return { x: e.clientX - r.left, y: e.clientY - r.top }
+  }
+  miniCanvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !e.isPrimary) return
+    e.preventDefault()
+    miniCanvas.setPointerCapture(e.pointerId)
+    cam.enterFreeLook(); applySync()
+    const box = { x: 0, y: 0, w: miniCanvas.clientWidth, h: miniCanvas.clientHeight }
+    const scrub = (ev: PointerEvent) => { const p = stripLocal(ev); cam.miniJumpInBox(p.x, p.y, box) }
+    scrub(e)
+    const up = () => {
+      miniCanvas.removeEventListener('pointermove', scrub)
+      miniCanvas.removeEventListener('pointerup', up)
+      miniCanvas.removeEventListener('pointercancel', up)
+    }
+    miniCanvas.addEventListener('pointermove', scrub)
+    miniCanvas.addEventListener('pointerup', up)
+    miniCanvas.addEventListener('pointercancel', up)
+  })
 
   // Free-look toggle button — touch equivalent of right-click (which has no touch
   // gesture). Always visible; harmless on desktop.
@@ -461,42 +573,101 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   canvas.addEventListener('pointerup', endTouch)
   canvas.addEventListener('pointercancel', endTouch)
 
+  // Live layout flag — updated each resize (portrait can toggle on rotation).
+  let portrait = isPortraitMobile()
+
+  const dprOf = () => (typeof window !== 'undefined' && window.devicePixelRatio) || 1
+
+  // Sizes the minimap strip canvas to its CSS box (portrait only).
+  function resizeStrip() {
+    if (!miniCtx) return
+    const w = miniCanvas.clientWidth, h = miniCanvas.clientHeight
+    if (w === 0 || h === 0) return
+    const dpr = dprOf()
+    miniCanvas.width = Math.round(w * dpr); miniCanvas.height = Math.round(h * dpr)
+    miniCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  }
+
   function resize() {
-    // CSS-pixel size the game logic works in. Use the host's actual size, but
-    // never smaller than minW/minH ON DESKTOP — i.e. only enforce the floor when
-    // the host is a mouse/large screen. On a small/touch screen we fit the host
-    // exactly, so the canvas no longer overflows and forces page scroll/zoom.
-    const hostW = host.clientWidth || minW
-    const hostH = host.clientHeight || minH
-    const small = Math.min(window.innerWidth, window.innerHeight) < minH ||
-      (typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches)
-    const cw = small ? hostW : Math.max(minW, hostW)
-    const ch = small ? hostH : Math.max(minH, hostH)
+    portrait = isPortraitMobile()
+    root.classList.toggle('gc-portrait', portrait)
+
+    let cw: number, ch: number
+    if (portrait) {
+      // Square canvas laid out in normal page flow (the .gc-square element is
+      // width:100%; aspect-ratio:1/1 via CSS). We DON'T pin to the visual
+      // viewport or fill dvh — the page scrolls normally, so the mobile address
+      // bar collapses on scroll like any web page. Size the canvas to the
+      // square element's rendered box.
+      root.style.position = ''; root.style.left = ''; root.style.top = ''
+      const side = Math.round(squareEl.clientWidth) || Math.round(host.clientWidth) || 320
+      cw = ch = side
+      resizeStrip()
+    } else {
+      // Desktop / landscape-desktop: canvas fills the viewport (visual viewport
+      // on touch, host size floored at minW/minH on mouse). Unchanged behavior.
+      const vv = window.visualViewport
+      const coarse = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+      const small = coarse || Math.min(window.innerWidth, window.innerHeight) < minH
+      if (small && vv) {
+        cw = Math.round(vv.width); ch = Math.round(vv.height)
+        root.style.position = 'fixed'
+        root.style.left = vv.offsetLeft + 'px'
+        root.style.top = vv.offsetTop + 'px'
+      } else {
+        const hostW = host.clientWidth || minW
+        const hostH = host.clientHeight || minH
+        cw = small ? hostW : Math.max(minW, hostW)
+        ch = small ? hostH : Math.max(minH, hostH)
+        root.style.position = ''; root.style.left = ''; root.style.top = ''
+      }
+    }
     // Backing store at devicePixelRatio for crisp rendering on retina/mobile; the
     // ctx is scaled so all draw code keeps working in CSS px (== cam.cw/cam.ch).
-    const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1
+    const dpr = dprOf()
     canvas.width = Math.round(cw * dpr); canvas.height = Math.round(ch * dpr)
     canvas.style.width = cw + 'px'; canvas.style.height = ch + 'px'
-    root.style.width = cw + 'px'; root.style.height = ch + 'px'
+    if (!portrait) { root.style.width = cw + 'px'; root.style.height = ch + 'px' }
+    else { root.style.width = ''; root.style.height = '' }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     cam.resize(cw, ch)
     readInsets()
   }
   resize()
   new ResizeObserver(resize).observe(host)
+  new ResizeObserver(resize).observe(squareEl)
   // Address-bar show/hide and orientation changes fire on the visual viewport,
   // not always on the host — re-read insets/size there too.
   window.addEventListener('orientationchange', resize)
+  // The visual viewport resizes AND scrolls as the address bar shows/hides — both
+  // change the visible height/offset, so re-sync on either.
   window.visualViewport?.addEventListener('resize', resize)
+  window.visualViewport?.addEventListener('scroll', resize)
 
   return {
     root,
     canvas,
     ctx,
     insets,
+    get portrait() { return portrait },
+    miniCtx,
+    miniStripBox() {
+      return { x: 0, y: 0, w: miniCanvas.clientWidth, h: miniCanvas.clientHeight }
+    },
     setHud(text: string | null) {
       hudEl.style.display = text === null ? 'none' : ''
       if (text !== null) hudEl.textContent = text
+    },
+    setControls(s: ControlsState) {
+      if (!portrait) return
+      for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-club]')))
+        btn.classList.toggle('active', btn.dataset.club === s.club)
+      for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-spin]')))
+        btn.classList.toggle('active', btn.dataset.spin === s.spin)
+      hitBtnEl.classList.toggle('active', s.swinging)
+      meterBallEl.style.left = `${s.meterPct}%`
+      if (s.bunkerPct === null) { bunkerEl.textContent = ''; bunkerEl.classList.remove('show') }
+      else { bunkerEl.textContent = `${s.bunkerPct}%`; bunkerEl.classList.add('show') }
     },
     sync: applySync,
     closeMenu() { menuPanelEl.style.display = 'none' },

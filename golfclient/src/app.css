@@ -53,6 +53,16 @@ body {
   background: #050505;
   height: 100dvh;
 }
+/* Portrait mobile: the game is a square canvas in a normally scrolling page
+   (minimap strip above, DOM controls below) — so let the page scroll instead of
+   locking to the viewport. See gameChrome.css .gc-portrait. */
+@media (pointer: coarse) and (orientation: portrait) {
+  .game-screen {
+    overflow: visible;
+    height: auto;
+    min-height: 100dvh;
+  }
+}
 
 /* "Coming soon" placeholder (Online). */
 .coming-soon {
