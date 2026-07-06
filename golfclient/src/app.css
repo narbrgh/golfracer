@@ -44,10 +44,14 @@ body {
 
 /* Single-player/editor screen — same dark backdrop as the match screen
    (navigation back to the main menu lives in the hamburger menu instead of a
-   standalone corner button; see gameCamera.ts's mountGameChrome). */
+   standalone corner button; see gameCamera.ts's mountGameChrome).
+   Uses dynamic viewport height (dvh) so the canvas fits the *visible* area on
+   mobile — excluding the browser address bar — instead of running underneath it
+   (100vh counts the area behind the address bar). */
 .game-screen {
   overflow: hidden;
   background: #050505;
+  height: 100dvh;
 }
 
 /* "Coming soon" placeholder (Online). */

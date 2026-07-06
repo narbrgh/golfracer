@@ -544,6 +544,11 @@ function draw() {
 
   ctx.restore()
 
+  // Central aim zone — the hashed blue circle where a drag starts an aim (drags
+  // outside it pan the view). Shown whenever aiming is available, highlighted
+  // while actively aiming.
+  if (canShootNow()) swing.drawAimZone(ctx, cam.cw, cam.ch, aiming && aimEngaged)
+
   if (aiming) {
     ctx.strokeStyle = aimEngaged ? AIM_DRAG_COLOR : 'rgba(255,60,60,0.85)'; ctx.lineWidth = 2
     ctx.beginPath(); ctx.arc(aimStartSx, aimStartSy, AIM_DEADZONE_R, 0, Math.PI * 2); ctx.stroke()
@@ -569,7 +574,7 @@ function draw() {
   ctx.fillStyle = '#888'; ctx.font = '12px monospace'
   ctx.fillText(`hole: ${formatDistance(holeDistPx)}`, miniBox.x + 2, miniBox.y + miniBox.h + 18)
 
-  swing.drawHud(ctx, cam.cw, cam.ch)
+  swing.drawHud(ctx, cam.cw, cam.ch, chrome.insets)
 }
 
 function updateHud() {
@@ -625,7 +630,7 @@ canvas.addEventListener('pointerdown', (e) => {
     return
   }
 
-  const hud = swing.hitTestHud(cx, cy, cam.cw, cam.ch)
+  const hud = swing.hitTestHud(cx, cy, cam.cw, cam.ch, chrome.insets)
   if (hud) {
     if (hud === 'hit') {
       pressHitShortcut()
@@ -635,10 +640,9 @@ canvas.addEventListener('pointerdown', (e) => {
     return
   }
 
-  if (cam.mode === 'free') {
-    // Drag pans the view.
+  function startPanDrag(sx: number, sy: number) {
     canvas.setPointerCapture(e.pointerId)
-    let panLastX = cx, panLastY = cy
+    let panLastX = sx, panLastY = sy
     canvas.style.cursor = 'grabbing'
     function onMove(ev: PointerEvent) {
       const r = canvas.getBoundingClientRect()
@@ -647,10 +651,21 @@ canvas.addEventListener('pointerdown', (e) => {
       panLastX = mx; panLastY = my
     }
     function onUp() {
-      canvas.style.cursor = 'grab'
+      canvas.style.cursor = cam.mode === 'free' ? 'grab' : 'crosshair'
       window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp)
     }
     window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp)
+  }
+
+  if (cam.mode === 'free') { startPanDrag(cx, cy); return }
+
+  // Follow mode. A drag that starts OUTSIDE the central aim zone scrolls the
+  // view (enters free-look so the pan sticks — the camera auto-follows the ball
+  // in follow mode and would otherwise snap right back). Only a press that lands
+  // INSIDE the aim zone (or when we can't shoot anyway) starts an aim.
+  if (canShootNow() && !swing.inAimZone(cx, cy, cam.cw, cam.ch)) {
+    cam.enterFreeLook(); chrome.sync()
+    startPanDrag(cx, cy)
     return
   }
 

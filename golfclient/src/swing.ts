@@ -19,9 +19,13 @@
 // let the server derive power/accuracy/duff itself; getLaunchVelocity's
 // math would move server-side at that point. Not done yet.
 
+import type { SafeInsets } from './gameCamera'
+
 export type Club = 'driver' | 'wedge' | 'putter'
 export type Spin = 'back' | 'none' | 'top'
 export type HudRegion = `club:${Club}` | `spin:${Spin}` | 'hit' | 'meter'
+
+const ZERO_INSETS: SafeInsets = { top: 0, right: 0, bottom: 0, left: 0 }
 
 const CLUBS: Club[] = ['driver', 'wedge', 'putter']
 const SPINS: Spin[] = ['back', 'none', 'top']
@@ -59,9 +63,10 @@ const PUTTER_RAY_LEN = 220    // world px — fixed preview length for the putte
 const ICON = 44        // finger-friendly tap target (≥44px)
 const ICON_GAP = 8
 const GROUP_GAP = 22   // gap between the club and spin groups (row 1)
-const BUNKER_W = 52    // reserved slot for the bunker-% readout (between the groups)
+const BUNKER_W = 40    // reserved slot for the bunker-% readout (between the groups)
 const ROW_GAP = 14     // vertical gap between the two rows
 const BOTTOM_MARGIN = 34 // more room at the bottom (was 18)
+const SIDE_MARGIN = 22   // landscape: distance from the left/right screen edge
 const HIT_W = 58, HIT_H = 44
 const HIT_METER_GAP = 14
 const METER_W = 220   // wider now that it owns its own row
@@ -69,13 +74,16 @@ const METER_H = 26
 const BALL_R = 8
 
 interface HudLayout {
-  row1Y: number; row2Y: number   // top Y of each row's tallest element
-  iconY: number                  // row-1 icon top
-  clubXs: number[]; spinXs: number[]
-  bunkerX: number                // left of the bunker-% slot (row 1)
+  // Per-element top-left corners (screen px). Portrait stacks them in two bottom
+  // rows; landscape splits them to the left (clubs+spin) and right (Hit!+meter)
+  // edges — but the draw/hit-test code only reads these coordinates, so it's
+  // orientation-agnostic.
+  clubXs: number[]; clubY: number
+  spinXs: number[]; spinY: number
+  bunkerX: number; bunkerY: number   // center-x anchor is bunkerX + BUNKER_W/2
   hitX: number; hitY: number
   meterX: number; meterY: number; meterW: number
-  top: number                    // topmost pixel of the HUD (for hit-testing)
+  hitBox: { x: number; y: number; w: number; h: number }  // union bbox for hit-test gating
 }
 
 function clamp(v: number, lo: number, hi: number): number { return Math.max(lo, Math.min(hi, v)) }
@@ -121,45 +129,96 @@ export class SwingEngine {
     this.aimAngle = holeX >= ballX ? -Math.PI / 4 : (-3 * Math.PI) / 4
   }
 
-  private layout(cw: number, ch: number): HudLayout {
-    // Two rows, each centered independently. Row 2 (Hit! + meter) sits at the
-    // bottom; row 1 (clubs · bunker% · spin) sits a ROW_GAP above it.
-    const row2Y = ch - HIT_H - BOTTOM_MARGIN
-    const row1Y = row2Y - ROW_GAP - ICON
-    const iconY = row1Y
-
-    // ---- Row 1: clubs · bunker% · spin, centered as a whole ----
+  private layout(cw: number, ch: number, insets: SafeInsets = ZERO_INSETS): HudLayout {
     const groupW = 3 * ICON + 2 * ICON_GAP
-    const row1W = groupW + GROUP_GAP + BUNKER_W + GROUP_GAP + groupW
-    let cx = (cw - row1W) / 2
-    const clubXs: number[] = []
-    for (let i = 0; i < 3; i++) { clubXs.push(cx); cx += ICON + ICON_GAP }
-    cx += GROUP_GAP - ICON_GAP
-    const bunkerX = cx
-    cx += BUNKER_W + GROUP_GAP
-    const spinXs: number[] = []
-    for (let i = 0; i < 3; i++) { spinXs.push(cx); cx += ICON + ICON_GAP }
+    // Landscape screens are short: a stacked bottom HUD would run off the top of
+    // the play area and under the gesture bar. So in landscape we move the HUD to
+    // the SIDES — clubs+spin on the left, Hit!+meter on the right — where the tall
+    // dimension gives room. Portrait keeps the two centered bottom rows.
+    const landscape = cw > ch
 
-    // ---- Row 2: Hit! · meter, centered as a whole ----
+    if (landscape) {
+      const left = SIDE_MARGIN + insets.left
+      const right = cw - SIDE_MARGIN - insets.right
+      // Left column: clubs row above spin row, vertically centered on screen.
+      const colH = ICON + ROW_GAP + ICON
+      let ly = (ch - colH) / 2
+      const clubXs: number[] = []
+      for (let i = 0; i < 3; i++) clubXs.push(left + i * (ICON + ICON_GAP))
+      const clubY = ly
+      ly += ICON + ROW_GAP
+      const spinXs: number[] = []
+      for (let i = 0; i < 3; i++) spinXs.push(left + i * (ICON + ICON_GAP))
+      const spinY = ly
+      // Bunker % sits just right of the club/spin block, centered vertically.
+      const bunkerX = left + groupW + 10
+      const bunkerY = (clubY + spinY + ICON) / 2 - ICON / 2
+
+      // Right column: Hit! above the meter, vertically centered.
+      const rColH = HIT_H + ROW_GAP + METER_H
+      let ry = (ch - rColH) / 2
+      const hitX = right - HIT_W
+      const hitY = ry
+      ry += HIT_H + ROW_GAP
+      const meterW = METER_W
+      const meterX = right - meterW
+      const meterY = ry + 4
+
+      const hbX = Math.min(clubXs[0], hitX)
+      const hbW = Math.max(spinXs[2] + ICON, right) - hbX
+      const hbY = Math.min(clubY, hitY)
+      const hbH = Math.max(spinY + ICON, meterY + METER_H) - hbY
+      return {
+        clubXs, clubY, spinXs, spinY, bunkerX, bunkerY, hitX, hitY,
+        meterX, meterY, meterW, hitBox: { x: hbX, y: hbY, w: hbW, h: hbH },
+      }
+    }
+
+    // ---- Portrait: two centered bottom rows, lifted above the safe-area. ----
+    const row2Y = ch - HIT_H - BOTTOM_MARGIN - insets.bottom
+    const row1Y = row2Y - ROW_GAP - ICON
+
+    // Row 1: clubs · bunker% · spin as ONE compact centered cluster (not
+    // justified to the screen edges — that left an odd empty middle). The gap
+    // is fixed so the two groups stay close; the bunker% slot lives between them.
+    const g1 = GROUP_GAP
+    const row1W = groupW + g1 + BUNKER_W + g1 + groupW
+    const row1Left = (cw - row1W) / 2
+    const clubXs: number[] = []
+    for (let i = 0; i < 3; i++) clubXs.push(row1Left + i * (ICON + ICON_GAP))
+    const bunkerX = row1Left + groupW + g1
+    const spinLeft = bunkerX + BUNKER_W + g1
+    const spinXs: number[] = []
+    for (let i = 0; i < 3; i++) spinXs.push(spinLeft + i * (ICON + ICON_GAP))
+
+    // Row 2: Hit! · meter, centered — but within the width left of the
+    // bottom-right button column (🔍/☰, ~44px + margins) so the meter's right
+    // end doesn't slide under those buttons.
+    const btnGutter = 72
     const row2W = HIT_W + HIT_METER_GAP + METER_W
-    let rx = (cw - row2W) / 2
+    let rx = Math.max(8, (cw - btnGutter - row2W) / 2)
     const hitX = rx
     const hitY = row2Y
     rx += HIT_W + HIT_METER_GAP
     const meterX = rx, meterW = METER_W
     const meterY = row2Y + (HIT_H - METER_H) / 2
 
-    return { row1Y, row2Y, iconY, clubXs, spinXs, bunkerX, hitX, hitY, meterX, meterY, meterW, top: row1Y }
+    return {
+      clubXs, clubY: row1Y, spinXs, spinY: row1Y, bunkerX, bunkerY: row1Y,
+      hitX, hitY, meterX, meterY, meterW,
+      hitBox: { x: 0, y: row1Y, w: cw, h: ch - row1Y },
+    }
   }
 
-  /** Hit-tests a screen-space point against the HUD. Returns null if outside the bar. */
-  hitTestHud(x: number, y: number, cw: number, ch: number): HudRegion | null {
-    const L = this.layout(cw, ch)
-    if (y < L.top) return null
+  /** Hit-tests a screen-space point against the HUD. Returns null if outside it. */
+  hitTestHud(x: number, y: number, cw: number, ch: number, insets: SafeInsets = ZERO_INSETS): HudRegion | null {
+    const L = this.layout(cw, ch, insets)
+    const b = L.hitBox
+    if (x < b.x || x > b.x + b.w || y < b.y || y > b.y + b.h) return null
     const inBox = (bx: number, by: number, bw: number, bh: number) =>
       x >= bx && x <= bx + bw && y >= by && y <= by + bh
-    for (let i = 0; i < 3; i++) if (inBox(L.clubXs[i], L.iconY, ICON, ICON)) return `club:${CLUBS[i]}`
-    for (let i = 0; i < 3; i++) if (inBox(L.spinXs[i], L.iconY, ICON, ICON)) return `spin:${SPINS[i]}`
+    for (let i = 0; i < 3; i++) if (inBox(L.clubXs[i], L.clubY, ICON, ICON)) return `club:${CLUBS[i]}`
+    for (let i = 0; i < 3; i++) if (inBox(L.spinXs[i], L.spinY, ICON, ICON)) return `spin:${SPINS[i]}`
     if (inBox(L.hitX, L.hitY, HIT_W, HIT_H)) return 'hit'
     if (inBox(L.meterX, L.meterY - 10, L.meterW, METER_H + 20)) return 'meter'
     return null
@@ -270,35 +329,68 @@ export class SwingEngine {
   }
 
   /**
+   * The central "aim zone" (screen px): a fixed circle at screen center. On
+   * touch this is the only region where a drag starts an aim — drags outside it
+   * pan/scroll the view, so the player can survey the hole without accidentally
+   * re-aiming every time they try to scroll. Radius scales gently with the
+   * smaller screen dimension so it's a comfortable thumb target on any device.
+   */
+  aimZone(cw: number, ch: number): { x: number; y: number; r: number } {
+    const r = clamp(Math.min(cw, ch) * 0.16, 60, 130)
+    return { x: cw / 2, y: ch / 2, r }
+  }
+
+  /** True if a screen point is inside the central aim zone. */
+  inAimZone(sx: number, sy: number, cw: number, ch: number): boolean {
+    const z = this.aimZone(cw, ch)
+    return Math.hypot(sx - z.x, sy - z.y) <= z.r
+  }
+
+  /** Draws the hashed blue aim-zone circle (screen space). Call when aiming is
+   * available so the player sees where to grab to aim. */
+  drawAimZone(ctx: CanvasRenderingContext2D, cw: number, ch: number, active = false) {
+    const z = this.aimZone(cw, ch)
+    ctx.save()
+    ctx.strokeStyle = active ? 'rgba(120,200,255,0.95)' : 'rgba(120,200,255,0.55)'
+    ctx.lineWidth = 2
+    ctx.setLineDash([7, 6])
+    ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2); ctx.stroke()
+    ctx.setLineDash([])
+    // A small center tick so the zone reads as an aim target, not just a ring.
+    ctx.fillStyle = 'rgba(120,200,255,0.7)'
+    ctx.beginPath(); ctx.arc(z.x, z.y, 3, 0, Math.PI * 2); ctx.fill()
+    ctx.restore()
+  }
+
+  /**
    * HUD overlay — call in screen space (after the world transform is
    * restored). Floats directly over the game view: no opaque backing bar,
    * each control just carries its own translucent fill.
    */
-  drawHud(ctx: CanvasRenderingContext2D, cw: number, ch: number) {
-    const L = this.layout(cw, ch)
+  drawHud(ctx: CanvasRenderingContext2D, cw: number, ch: number, insets: SafeInsets = ZERO_INSETS) {
+    const L = this.layout(cw, ch, insets)
     ctx.save()
 
-    const drawIcon = (x: number, label: string, selected: boolean) => {
+    const drawIcon = (x: number, y: number, label: string, selected: boolean) => {
       ctx.beginPath()
-      ctx.roundRect(x, L.iconY, ICON, ICON, 6)
+      ctx.roundRect(x, y, ICON, ICON, 6)
       ctx.fillStyle = 'rgba(128,128,128,0.5)'; ctx.fill()
       ctx.strokeStyle = selected ? '#fff' : '#000'
       ctx.lineWidth = selected ? 2 : 1.5
       ctx.stroke()
       ctx.fillStyle = '#fff'; ctx.font = 'bold 12px monospace'
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-      ctx.fillText(label, x + ICON / 2, L.iconY + ICON / 2 + 1)
+      ctx.fillText(label, x + ICON / 2, y + ICON / 2 + 1)
     }
-    CLUBS.forEach((c, i) => drawIcon(L.clubXs[i], CLUB_LABEL[c], this.club === c))
-    SPINS.forEach((s, i) => drawIcon(L.spinXs[i], SPIN_LABEL[s], this.spin === s))
+    CLUBS.forEach((c, i) => drawIcon(L.clubXs[i], L.clubY, CLUB_LABEL[c], this.club === c))
+    SPINS.forEach((s, i) => drawIcon(L.spinXs[i], L.spinY, SPIN_LABEL[s], this.spin === s))
 
-    // Bunker penalty readout — in its own slot between the club and spin groups
-    // (row 1). The selected club's power multiplier as a percentage (e.g.
-    // 25% / 70% / 50%), shown only while the ball sits in sand.
+    // Bunker penalty readout — the selected club's power multiplier as a
+    // percentage (e.g. 25% / 70% / 50%), shown only while the ball sits in sand.
     if (this.inBunker) {
       const pct = Math.round(CLUB_BUNKER_PENALTY[this.club] * 100)
       const px = L.bunkerX + BUNKER_W / 2
-      const py = L.iconY + ICON / 2
+      const py = L.bunkerY + ICON / 2
       ctx.font = 'bold 16px monospace'
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
       ctx.fillStyle = 'rgba(0,0,0,0.55)'

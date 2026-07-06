@@ -309,6 +309,10 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
 
     ctx.restore()
 
+    // Central aim zone — the hashed blue circle where a drag starts an aim
+    // (drags outside it scroll the view). Shown whenever aiming is available.
+    if (canShoot()) swing.drawAimZone(ctx, cam.cw, cam.ch, aiming && aimEngaged)
+
     // Aim-drag visualization (screen space): dead-zone circle at the origin —
     // red while inside it (cancelable), light blue once dragged past — plus a
     // dashed line to the cursor.
@@ -357,7 +361,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     }
 
     // Swing HUD (club/spin selectors + Hit! meter), drawn last, screen space.
-    swing.drawHud(ctx, cam.cw, cam.ch)
+    swing.drawHud(ctx, cam.cw, cam.ch, chrome.insets)
   }
 
   function tick() {
@@ -492,17 +496,16 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         }
         // Swing HUD (club/spin selectors + Hit! button) — hit-tested before the
         // free-look/aim branches so the controls work in either camera mode.
-        const hud = swing.hitTestHud(p.x, p.y, cam.cw, cam.ch)
+        const hud = swing.hitTestHud(p.x, p.y, cam.cw, cam.ch, chrome.insets)
         if (hud) {
           if (hud === 'hit') fireHit()
           else swing.handleHudClick(hud)
           return
         }
 
-        if (cam.mode === 'free') {
-          // Drag pans the view.
+        const startPanDrag = (sx: number, sy: number) => {
           canvas.setPointerCapture(e.pointerId)
-          let panLastX = p.x, panLastY = p.y
+          let panLastX = sx, panLastY = sy
           canvas.style.cursor = 'grabbing'
           const onMove = (ev: PointerEvent) => {
             const q = screenPos(ev)
@@ -510,17 +513,26 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
             panLastX = q.x; panLastY = q.y
           }
           const onUp = () => {
-            canvas.style.cursor = 'grab'
+            canvas.style.cursor = cam.mode === 'free' ? 'grab' : 'crosshair'
             window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp)
           }
           window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp)
+        }
+
+        if (cam.mode === 'free') { startPanDrag(p.x, p.y); return }
+
+        // Follow mode: a drag OUTSIDE the central aim zone scrolls the view
+        // (enters free-look so the pan sticks against the auto-follow). Only a
+        // press INSIDE the aim zone starts an aim.
+        if (canShoot() && !swing.inAimZone(p.x, p.y, cam.cw, cam.ch)) {
+          cam.enterFreeLook(); chrome.sync()
+          startPanDrag(p.x, p.y)
           return
         }
 
-        // Aim-drag (click-anywhere slingshot, dead-zone cancel) — same model as
-        // single-player. The aim is set from the drag's start->current point, so
-        // the click need not land on the ball. Firing is via the Hit! meter, not
-        // release, so onUp just finalizes the angle.
+        // Aim-drag (slingshot, dead-zone cancel) — same model as single-player.
+        // The aim is set from the drag's start->current point. Firing is via the
+        // Hit! meter, not release, so onUp just finalizes the angle.
         if (!canShoot()) return
         canvas.setPointerCapture(e.pointerId)
         const startSx = p.x, startSy = p.y

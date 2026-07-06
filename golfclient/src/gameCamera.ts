@@ -296,10 +296,17 @@ export class GameCamera {
 
 export interface ChromeMenuItem { label: string; onClick: () => void; style?: string }
 
+/** Safe-area insets (CSS px) — how much of each edge is covered by system UI
+ * (notch, home-indicator/gesture bar, rounded corners). Read from a CSS probe. */
+export interface SafeInsets { top: number; right: number; bottom: number; left: number }
+
 export interface GameChromeHandle {
   root: HTMLElement
   canvas: HTMLCanvasElement
   ctx: CanvasRenderingContext2D
+  /** Current safe-area insets in CSS px; refreshed on resize. Mutated in place,
+   * so callers can hold the reference and read the live values each frame. */
+  insets: SafeInsets
   /** Sets the top-left hole/timer HUD text; null hides the pill entirely. */
   setHud(text: string | null): void
   /**
@@ -329,6 +336,7 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   root.className = 'gc-wrap'
   root.innerHTML = `
     <canvas class="gc-canvas"></canvas>
+    <div class="gc-safe-probe" data-safe></div>
     <div class="gc-hud" data-hud></div>
     <div class="free-arrows" data-arrows style="display:none">
       <div class="free-hint">Free look — Enter, M, Space, or right-click to exit</div>
@@ -351,6 +359,18 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   const menuToggleEl = root.querySelector<HTMLButtonElement>('[data-menu-toggle]')!
   const menuPanelEl = root.querySelector<HTMLElement>('[data-menu-panel]')!
   const lookToggleEl = root.querySelector<HTMLButtonElement>('[data-look-toggle]')!
+  const safeEl = root.querySelector<HTMLElement>('[data-safe]')!
+
+  // Live safe-area insets — refreshed in resize() from the probe's resolved
+  // env() padding. Mutated in place so the handle's holder sees updates.
+  const insets: SafeInsets = { top: 0, right: 0, bottom: 0, left: 0 }
+  function readInsets() {
+    const s = getComputedStyle(safeEl)
+    insets.top = parseFloat(s.paddingTop) || 0
+    insets.right = parseFloat(s.paddingRight) || 0
+    insets.bottom = parseFloat(s.paddingBottom) || 0
+    insets.left = parseFloat(s.paddingLeft) || 0
+  }
 
   for (const item of opts.menuItems) {
     const btn = document.createElement('button')
@@ -460,14 +480,20 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     root.style.width = cw + 'px'; root.style.height = ch + 'px'
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     cam.resize(cw, ch)
+    readInsets()
   }
   resize()
   new ResizeObserver(resize).observe(host)
+  // Address-bar show/hide and orientation changes fire on the visual viewport,
+  // not always on the host — re-read insets/size there too.
+  window.addEventListener('orientationchange', resize)
+  window.visualViewport?.addEventListener('resize', resize)
 
   return {
     root,
     canvas,
     ctx,
+    insets,
     setHud(text: string | null) {
       hudEl.style.display = text === null ? 'none' : ''
       if (text !== null) hudEl.textContent = text
