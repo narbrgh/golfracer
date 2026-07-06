@@ -458,7 +458,13 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-spin]'))) {
     btn.addEventListener('click', () => opts.onSpin?.(btn.dataset.spin!))
   }
-  hitBtnEl.addEventListener('click', () => opts.onHit?.())
+  hitBtnEl.addEventListener('click', () => {
+    // In free-look the swing meter can't start (you must be aiming in follow
+    // mode). Rather than a confusing no-op, tapping Hit! exits free-look so the
+    // next tap starts the swing. The button is greyed while in free-look.
+    if (cam.mode === 'free') { cam.exitFreeLook(); applySync(); return }
+    opts.onHit?.()
+  })
 
   // Live safe-area insets — refreshed in resize() from the probe's resolved
   // env() padding. Mutated in place so the handle's holder sees updates.
@@ -505,6 +511,9 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     arrowsEl.style.display = cam.mode === 'free' ? '' : 'none'
     canvas.style.cursor = cam.mode === 'free' ? 'grab' : 'crosshair'
     lookToggleEl.classList.toggle('active', cam.mode === 'free')
+    // Grey the Hit! button in free-look — the meter can't start there (tapping it
+    // just exits free-look).
+    hitBtnEl.classList.toggle('disabled', cam.mode === 'free')
   }
   applySync()
 
