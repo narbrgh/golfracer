@@ -602,7 +602,11 @@ function tick() {
 requestAnimationFrame(tick)
 
 // ---- Input ----
-canvas.addEventListener('mousedown', (e) => {
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return // primary/left only (touch reports button 0)
+  // Second (and later) touch points drive pinch-zoom in mountGameChrome; only the
+  // primary pointer starts an aim/pan here.
+  if (!e.isPrimary) return
   const rect = canvas.getBoundingClientRect()
   const cx = e.clientX - rect.left, cy = e.clientY - rect.top
 
@@ -611,13 +615,13 @@ canvas.addEventListener('mousedown', (e) => {
     cam.enterFreeLook()
     chrome.sync()
     cam.miniJump(cx, cy)
-    function onMiniMove(ev: MouseEvent) {
+    function onMiniMove(ev: PointerEvent) {
       const r = canvas.getBoundingClientRect(); cam.miniJump(ev.clientX - r.left, ev.clientY - r.top)
     }
     function onMiniUp() {
-      window.removeEventListener('mousemove', onMiniMove); window.removeEventListener('mouseup', onMiniUp)
+      window.removeEventListener('pointermove', onMiniMove); window.removeEventListener('pointerup', onMiniUp); window.removeEventListener('pointercancel', onMiniUp)
     }
-    window.addEventListener('mousemove', onMiniMove); window.addEventListener('mouseup', onMiniUp)
+    window.addEventListener('pointermove', onMiniMove); window.addEventListener('pointerup', onMiniUp); window.addEventListener('pointercancel', onMiniUp)
     return
   }
 
@@ -632,10 +636,11 @@ canvas.addEventListener('mousedown', (e) => {
   }
 
   if (cam.mode === 'free') {
-    // Left-drag pans the view.
+    // Drag pans the view.
+    canvas.setPointerCapture(e.pointerId)
     let panLastX = cx, panLastY = cy
     canvas.style.cursor = 'grabbing'
-    function onMove(ev: MouseEvent) {
+    function onMove(ev: PointerEvent) {
       const r = canvas.getBoundingClientRect()
       const mx = ev.clientX - r.left, my = ev.clientY - r.top
       cam.panBy(mx - panLastX, my - panLastY)
@@ -643,9 +648,9 @@ canvas.addEventListener('mousedown', (e) => {
     }
     function onUp() {
       canvas.style.cursor = 'grab'
-      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp)
     }
-    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+    window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp)
     return
   }
 
@@ -658,6 +663,7 @@ canvas.addEventListener('mousedown', (e) => {
   const startSx = cx, startSy = cy
   const preDragAngle = swing.aimAngle
   aiming = true; aimStartSx = startSx; aimStartSy = startSy; aimCurSx = cx; aimCurSy = cy
+  canvas.setPointerCapture(e.pointerId)
 
   function applyAim(mx: number, my: number) {
     aimCurSx = mx; aimCurSy = my
@@ -668,17 +674,17 @@ canvas.addEventListener('mousedown', (e) => {
   }
   applyAim(cx, cy)
 
-  function onMove(ev: MouseEvent) {
+  function onMove(ev: PointerEvent) {
     const r = canvas.getBoundingClientRect()
     applyAim(ev.clientX - r.left, ev.clientY - r.top)
   }
-  function onUp(ev: MouseEvent) {
-    window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
+  function onUp(ev: PointerEvent) {
+    window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp)
     aiming = false
     const r = canvas.getBoundingClientRect()
     applyAim(ev.clientX - r.left, ev.clientY - r.top)
   }
-  window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+  window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp)
 })
 
 // ---- WebSocket ----

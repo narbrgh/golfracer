@@ -58,13 +58,13 @@ const PUTTER_RAY_LEN = 220    // world px — fixed preview length for the putte
 // even though the meter itself stays narrow.
 const HUD_WIDTH_FRAC = 0.75
 const BOTTOM_MARGIN = 18
-const HUD_H = 46
-const ICON = 38
+const HUD_H = 52
+const ICON = 44        // finger-friendly tap target (≥44px); cluster stays centered
 const ICON_GAP = 8
 const MIN_GROUP_GAP = 22
-const HIT_W = 46, HIT_H = 34
+const HIT_W = 52, HIT_H = 40
 const METER_W = 160   // fixed, narrow — not a full-width slider
-const METER_H = 22
+const METER_H = 24
 const BALL_R = 7
 
 interface HudLayout {

@@ -4,10 +4,18 @@
 
 .gc-wrap {
   position: relative;
+  touch-action: none;
+  overscroll-behavior: none;
 }
 .gc-canvas {
   display: block;
   cursor: crosshair;
+  /* Touch: don't let the browser steal drags for scroll/zoom (so pointermove
+     streams for aim/pan) and don't select/callout on long-press. */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 /* HUD: hole number + running clock (top-left) */
@@ -47,6 +55,26 @@
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
 }
 .gc-menu-toggle:hover { background: #fffdf5; }
+
+/* Free-look toggle — touch equivalent of right-click; same size/pill as the
+   hamburger. Sits above the menu toggle in the column. .active = free-look on. */
+.gc-look-toggle {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  border: 1px solid rgba(51, 168, 156, 0.5);
+  background: var(--cream);
+  color: var(--ink);
+  font-size: 20px;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+.gc-look-toggle:hover { background: #fffdf5; }
+.gc-look-toggle.active {
+  background: var(--sea-3);
+  color: var(--cream);
+  border-color: var(--sea-3);
+}
 .gc-menu-panel {
   display: flex;
   flex-direction: column;

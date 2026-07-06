@@ -426,7 +426,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     }
   }
 
-  function screenPos(ev: MouseEvent) {
+  function screenPos(ev: MouseEvent | PointerEvent) {
     const r = canvas.getBoundingClientRect()
     return { x: ev.clientX - r.left, y: ev.clientY - r.top }
   }
@@ -476,17 +476,18 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       boardEl.style.display = 'none'
       chrome.root.appendChild(boardEl)
 
-      canvas.addEventListener('mousedown', (e) => {
+      canvas.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return
+        if (!e.isPrimary) return // second touch drives pinch-zoom (mountGameChrome)
         const p = screenPos(e)
         // Minimap: enter free-look and scrub the camera by clicking/dragging on it.
         if (cam.miniHit(p.x, p.y)) {
           cam.enterFreeLook()
           chrome.sync()
           cam.miniJump(p.x, p.y)
-          const onMove = (ev: MouseEvent) => { const q = screenPos(ev); cam.miniJump(q.x, q.y) }
-          const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
-          window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+          const onMove = (ev: PointerEvent) => { const q = screenPos(ev); cam.miniJump(q.x, q.y) }
+          const onUp = () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp) }
+          window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp)
           return
         }
         // Swing HUD (club/spin selectors + Hit! button) — hit-tested before the
@@ -499,19 +500,20 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         }
 
         if (cam.mode === 'free') {
-          // Left-drag pans the view.
+          // Drag pans the view.
+          canvas.setPointerCapture(e.pointerId)
           let panLastX = p.x, panLastY = p.y
           canvas.style.cursor = 'grabbing'
-          const onMove = (ev: MouseEvent) => {
+          const onMove = (ev: PointerEvent) => {
             const q = screenPos(ev)
             cam.panBy(q.x - panLastX, q.y - panLastY)
             panLastX = q.x; panLastY = q.y
           }
           const onUp = () => {
             canvas.style.cursor = 'grab'
-            window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
+            window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp)
           }
-          window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+          window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp)
           return
         }
 
@@ -520,6 +522,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         // the click need not land on the ball. Firing is via the Hit! meter, not
         // release, so onUp just finalizes the angle.
         if (!canShoot()) return
+        canvas.setPointerCapture(e.pointerId)
         const startSx = p.x, startSy = p.y
         const preDragAngle = swing.aimAngle
         aiming = true; aimStartSx = startSx; aimStartSy = startSy; aimCurSx = startSx; aimCurSy = startSy
@@ -530,13 +533,13 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
           else swing.aimAngle = preDragAngle
         }
         applyAim(startSx, startSy)
-        const onMove = (ev: MouseEvent) => { const q = screenPos(ev); applyAim(q.x, q.y) }
-        const onUp = (ev: MouseEvent) => {
-          window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp)
+        const onMove = (ev: PointerEvent) => { const q = screenPos(ev); applyAim(q.x, q.y) }
+        const onUp = (ev: PointerEvent) => {
+          window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp)
           aiming = false
           const q = screenPos(ev); applyAim(q.x, q.y)
         }
-        window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+        window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onUp)
       })
 
       requestAnimationFrame(tick)

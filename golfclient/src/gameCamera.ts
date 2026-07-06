@@ -338,6 +338,7 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
       <button class="free-arrow fa-right" data-pan="right">▶</button>
     </div>
     <div class="gc-menu">
+      <button class="gc-look-toggle" data-look-toggle aria-label="Free look">🔍</button>
       <button class="gc-menu-toggle" data-menu-toggle aria-label="Menu">☰</button>
       <div class="gc-menu-panel" data-menu-panel style="display:none"></div>
     </div>`
@@ -349,6 +350,7 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   const arrowsEl = root.querySelector<HTMLElement>('[data-arrows]')!
   const menuToggleEl = root.querySelector<HTMLButtonElement>('[data-menu-toggle]')!
   const menuPanelEl = root.querySelector<HTMLElement>('[data-menu-panel]')!
+  const lookToggleEl = root.querySelector<HTMLButtonElement>('[data-look-toggle]')!
 
   for (const item of opts.menuItems) {
     const btn = document.createElement('button')
@@ -383,8 +385,13 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   function applySync() {
     arrowsEl.style.display = cam.mode === 'free' ? '' : 'none'
     canvas.style.cursor = cam.mode === 'free' ? 'grab' : 'crosshair'
+    lookToggleEl.classList.toggle('active', cam.mode === 'free')
   }
   applySync()
+
+  // Free-look toggle button — touch equivalent of right-click (which has no touch
+  // gesture). Always visible; harmless on desktop.
+  lookToggleEl.addEventListener('click', () => { cam.toggleFreeLook(); applySync() })
 
   canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); cam.toggleFreeLook(); applySync() })
   canvas.addEventListener('wheel', (e) => {
@@ -394,12 +401,64 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     cam.zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.1 : 1 / 1.1)
   }, { passive: false })
 
+  // ---- Pinch-to-zoom (touch equivalent of the wheel) ----
+  // Track active touch pointers; when exactly two are down, zoom about their
+  // centroid by the change in finger distance. Free-look only (mirrors wheel),
+  // so an aim in follow mode is never disturbed. A two-finger gesture is distinct
+  // from the one-finger aim/pan/tap the screens handle, so they don't conflict.
+  const touches = new Map<number, { x: number; y: number }>()
+  let pinchPrevDist = 0
+  const touchPt = (e: PointerEvent) => {
+    const r = canvas.getBoundingClientRect()
+    return { x: e.clientX - r.left, y: e.clientY - r.top }
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return
+    touches.set(e.pointerId, touchPt(e))
+    if (touches.size === 2) {
+      const [a, b] = [...touches.values()]
+      pinchPrevDist = Math.hypot(a.x - b.x, a.y - b.y)
+    }
+  })
+  canvas.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return
+    touches.set(e.pointerId, touchPt(e))
+    if (touches.size === 2 && cam.mode === 'free') {
+      const [a, b] = [...touches.values()]
+      const dist = Math.hypot(a.x - b.x, a.y - b.y)
+      if (pinchPrevDist > 0 && dist > 0) {
+        const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2
+        cam.zoomAt(cx, cy, dist / pinchPrevDist)
+      }
+      pinchPrevDist = dist
+    }
+  })
+  const endTouch = (e: PointerEvent) => {
+    if (e.pointerType !== 'touch') return
+    touches.delete(e.pointerId)
+    if (touches.size < 2) pinchPrevDist = 0
+  }
+  canvas.addEventListener('pointerup', endTouch)
+  canvas.addEventListener('pointercancel', endTouch)
+
   function resize() {
-    const cw = Math.max(minW, host.clientWidth || minW)
-    const ch = Math.max(minH, host.clientHeight || minH)
-    canvas.width = cw; canvas.height = ch
+    // CSS-pixel size the game logic works in. Use the host's actual size, but
+    // never smaller than minW/minH ON DESKTOP — i.e. only enforce the floor when
+    // the host is a mouse/large screen. On a small/touch screen we fit the host
+    // exactly, so the canvas no longer overflows and forces page scroll/zoom.
+    const hostW = host.clientWidth || minW
+    const hostH = host.clientHeight || minH
+    const small = Math.min(window.innerWidth, window.innerHeight) < minH ||
+      (typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches)
+    const cw = small ? hostW : Math.max(minW, hostW)
+    const ch = small ? hostH : Math.max(minH, hostH)
+    // Backing store at devicePixelRatio for crisp rendering on retina/mobile; the
+    // ctx is scaled so all draw code keeps working in CSS px (== cam.cw/cam.ch).
+    const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1
+    canvas.width = Math.round(cw * dpr); canvas.height = Math.round(ch * dpr)
     canvas.style.width = cw + 'px'; canvas.style.height = ch + 'px'
     root.style.width = cw + 'px'; root.style.height = ch + 'px'
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     cam.resize(cw, ch)
   }
   resize()
