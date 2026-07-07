@@ -67,7 +67,7 @@ func TestShotSweepNeverBelowSurface(t *testing.T) {
 				for _, dir := range []float64{1, -1} { // shoot right and left
 					ball := NewBall(sx, surface(sx)-10, 10)
 					rad := ang * math.Pi / 180
-					ball.Shoot(dir*sp*math.Cos(rad), -sp*math.Sin(rad))
+					ball.Shoot(dir*sp*math.Cos(rad), -sp*math.Sin(rad), 0, 0, false)
 					maxDepth, atTick := 0.0, -1
 					var atX, atY float64
 					for i := 0; i < 900; i++ { // 15s

@@ -53,6 +53,31 @@
 }
 .gc-wrap.gc-portrait .gc-hud > span:empty { display: none; }
 
+/* Wind indicator. Desktop: an inline span in the HUD pill, between hole and time.
+   Mobile: hidden there and shown instead in the bottom-left element below, so it
+   doesn't get spread across the top by the portrait HUD's space-between. */
+.gc-hud-wind { color: #bfe3ff; }
+.gc-hud-wind:empty { display: none; }
+.gc-wrap.gc-portrait .gc-hud-wind { display: none; }
+
+/* Mobile wind indicator: bottom-left corner of the canvas (desktop hides it). */
+.gc-wind-mobile { display: none; }
+.gc-wrap.gc-portrait .gc-wind-mobile {
+  position: absolute;
+  left: calc(10px + env(safe-area-inset-left, 0px));
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  z-index: 16;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(8, 14, 20, 0.72);
+  color: #bfe3ff;
+  font: 600 14px/1 ui-monospace, monospace;
+  letter-spacing: 0.5px;
+  white-space: pre;
+  pointer-events: none;
+}
+.gc-wrap.gc-portrait .gc-wind-mobile:empty { display: none; }
+
 /* Invisible probe whose padding resolves the safe-area insets so JS can read
    them (getComputedStyle) — the canvas-drawn HUD can't read env() directly. */
 .gc-safe-probe {

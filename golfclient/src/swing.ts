@@ -51,7 +51,73 @@ export const DEFAULT_CLUB_BUNKER_PENALTY: Record<Club, number> = { driver: 0.25,
 export const CLUB_BUNKER_PENALTY: Record<Club, number> = { ...DEFAULT_CLUB_BUNKER_PENALTY }
 
 const GRAVITY = 1500          // matches golfserver physics.Gravity
-const PUTTER_RAY_LEN = 220    // world px — fixed preview length for the putter's ground ray
+
+// Rolling friction (px/s² kinetic deceleration on grass) — mirrors golfserver
+// physics.DefaultTunables.RollingFriction. Used only to precompute the putter
+// preview line's LENGTH: how far a 100%-power putt rolls on LEVEL ground, from
+// v²/(2·friction). The Ken menu can retune the server copy, so this may drift
+// slightly (like GRAVITY does for the arc preview) — it's a guide, not physics.
+const ROLLING_FRICTION = 400
+
+/**
+ * World-px roll distance of a putt struck at `powerPct` on perfectly level
+ * ground: constant-deceleration stop distance v²/(2a). Independent of terrain —
+ * the putter guide line is always this long regardless of hills (item 4).
+ */
+export function putterRollDistance(powerPct = 100): number {
+  const v = CLUB_MAX_SPEED.putter * clamp(powerPct, 0, 100) / 100
+  return (v * v) / (2 * ROLLING_FRICTION)
+}
+
+// Air/spin constants mirroring golfserver physics.DefaultTunables (AirDrag,
+// SpinMagnus, WindMphScale). The SERVER is authoritative for real ball flight;
+// these only shape the client's preview parabola and multiplayer prediction so
+// they roughly match. If the Ken menu tunes the server copy the preview may drift
+// slightly, exactly as it would for gravity today.
+export const AIR_DRAG = 0.22
+export const SPIN_MAGNUS = 0.30
+export const WIND_MPH_SCALE = 55.0
+// Mirrors golfserver ball.go backspinExtraDrag — extra horizontal drag on backspun
+// shots so they carry shorter than no-spin. Keep equal to the server constant.
+export const BACKSPIN_EXTRA_DRAG = 0.6
+
+/** spin string → sign used by the Magnus term: back −1, top +1, else 0. */
+export function spinSign(spin: Spin): number { return spin === 'back' ? -1 : spin === 'top' ? 1 : 0 }
+
+/**
+ * One airborne physics substep, mirroring golfserver ball.go Tick's air forces
+ * (gravity + drag-toward-moving-air + Magnus). Mutates and returns the velocity.
+ * windVel is the horizontal air velocity in px/s (mph × WIND_MPH_SCALE); spin is
+ * −1/0/+1. Shared by the preview parabola and the multiplayer prediction loop so
+ * both track the server. Ground/roll physics is not modeled here (preview only).
+ */
+export function airStep(vx: number, vy: number, dt: number, windVel: number, spin: number): { vx: number; vy: number } {
+  vy += GRAVITY * dt
+  if (AIR_DRAG > 0) {
+    vx += -AIR_DRAG * (vx - windVel) * dt
+    vy += -AIR_DRAG * vy * dt
+  }
+  if (spin !== 0 && SPIN_MAGNUS > 0) {
+    const speed = Math.hypot(vx, vy)
+    if (speed > 1) {
+      if (spin > 0) {
+        // Topspin: perpendicular Magnus (dives). Unchanged.
+        const ux = vx / speed, uy = vy / speed
+        const px = -uy, py = ux
+        const mag = spin * SPIN_MAGNUS * speed * dt
+        vx += px * mag
+        vy += py * mag
+      } else {
+        // Backspin: lift only + extra horizontal drag → higher, steeper, shorter.
+        // Mirrors golfserver ball.go. (Landing bite is server-only, not previewed.)
+        const lift = SPIN_MAGNUS * speed * dt
+        vy -= lift
+        vx += -BACKSPIN_EXTRA_DRAG * AIR_DRAG * (vx - windVel) * dt
+      }
+    }
+  }
+  return { vx, vy }
+}
 
 // ---- HUD layout constants (screen space) ----
 // The HUD is a floating overlay drawn directly over the game view (no opaque
@@ -64,7 +130,6 @@ const ICON = 44        // finger-friendly tap target (≥44px)
 const ICON_GAP = 8
 const GROUP_GAP = 22   // gap between the club and spin groups (row 1)
 const BUNKER_W = 40    // reserved slot for the bunker-% readout (between the groups)
-const ROW_GAP = 14     // vertical gap between the two rows
 const BOTTOM_MARGIN = 34 // more room at the bottom (was 18)
 const HIT_W = 58, HIT_H = 44
 const HIT_METER_GAP = 14
@@ -115,8 +180,46 @@ export class SwingEngine {
   // shot-prediction power (the server applies the real penalty authoritatively).
   inBunker = false
 
+  // Set by the screen each frame: the current hole's horizontal air velocity in
+  // px/s (+right), i.e. wind mph × WIND_MPH_SCALE. Shapes the preview parabola so
+  // players can aim into the wind. 0 = calm.
+  windVel = 0
+
+  // Set by the screen each frame: true while the camera is in free-look. In
+  // free-look the meter can't start (you must be aiming in follow mode), so the
+  // Hit! button is greyed and a click just exits free-look — the same behavior
+  // the mobile DOM control already has.
+  freeLook = false
+
+  // Set by the screen each frame: current hole cup + ball world-X. Used to
+  // auto-aim the putter toward the hole the instant it's selected (item 2), from
+  // whatever selection path (keyboard, DOM button, or on-canvas HUD tap).
+  holeX = 0
+  ballX = 0
+
+  // Tracks the previous frame's "ready to shoot" state so setReady() can detect
+  // the moment the ball settles (rising edge) and re-aim the putter at the hole.
+  private wasReady = false
+
   constructor(cfg: SwingConfig = {}) {
     this.ballColorHex = cfg.ballColorHex ?? '#fff'
+  }
+
+  // Points the putter at the hole (horizontal-only aim: it just picks the side
+  // the cup is on, from the holeX/ballX the screen keeps updated). No-op for
+  // other clubs. Shared by club-selection (item 2) and settle re-aim.
+  private aimPutterAtHole(): void {
+    if (this.club !== 'putter') return
+    this.aimAngle = this.holeX >= this.ballX ? 0 : Math.PI
+  }
+
+  // Called each frame with whether the ball is settled and ready to hit. On the
+  // rising edge (ball just came to rest) it re-aims the putter at the hole, so a
+  // putt that rolls PAST the cup flips the aim back toward it for the next stroke
+  // instead of leaving it pointed the way the last putt travelled.
+  setReady(ready: boolean): void {
+    if (ready && !this.wasReady) this.aimPutterAtHole()
+    this.wasReady = ready
   }
 
   // Reset the swing selections at the start of a hole: driver, no spin, and a
@@ -128,43 +231,64 @@ export class SwingEngine {
     this.aimAngle = holeX >= ballX ? -Math.PI / 4 : (-3 * Math.PI) / 4
   }
 
+  // Selects a club. When switching TO the putter, auto-aims it toward the hole
+  // (item 2): putter aim is horizontal-only, so this just points it to whichever
+  // side the cup is on, using the holeX/ballX the screen keeps updated. Other
+  // clubs keep their existing aimAngle untouched. All club-selection paths
+  // (keyboard, DOM buttons, on-canvas HUD taps) go through here.
+  setClub(club: Club): void {
+    const switchingToPutter = club === 'putter' && this.club !== 'putter'
+    this.club = club
+    if (switchingToPutter) this.aimPutterAtHole()
+  }
+
   private layout(cw: number, ch: number, insets: SafeInsets = ZERO_INSETS): HudLayout {
     const groupW = 3 * ICON + 2 * ICON_GAP
     // On-canvas HUD (desktop only — mobile portrait uses DOM controls, mobile
-    // landscape shows a rotate prompt): two centered rows at the BOTTOM,
-    // clubs·bunker%·spin over Hit!·meter.
-    const row2Y = ch - HIT_H - BOTTOM_MARGIN - insets.bottom
-    const row1Y = row2Y - ROW_GAP - ICON
+    // landscape shows a rotate prompt): ONE row at the BOTTOM. The left cluster
+    // (clubs · bunker% · spin) and the right cluster (Hit! · meter) split to the
+    // two sides of a reserved center gap — the free-look ▼ button lives dead
+    // center at the bottom, so nothing may sit there.
+    const rowY = ch - HIT_H - BOTTOM_MARGIN - insets.bottom
+    // Controls are ICON tall (44) except the meter; align everything on this row.
+    const iconY = rowY + (HIT_H - ICON) / 2
 
-    // Row 1: clubs · bunker% · spin as ONE compact centered cluster (not
-    // justified to the screen edges — that left an odd empty middle). The gap
-    // is fixed so the two groups stay close; the bunker% slot lives between them.
+    // Reserved center gap for the free-look ▼ button (40px wide, centered).
+    const centerGapHalf = 60
+    const cx = cw / 2
+
+    // Left cluster: clubs · bunker% · spin, packed against the center gap's left
+    // edge (grows leftward from center).
     const g1 = GROUP_GAP
-    const row1W = groupW + g1 + BUNKER_W + g1 + groupW
-    const row1Left = (cw - row1W) / 2
+    const leftW = groupW + g1 + BUNKER_W + g1 + groupW
+    const leftStart = cx - centerGapHalf - leftW
     const clubXs: number[] = []
-    for (let i = 0; i < 3; i++) clubXs.push(row1Left + i * (ICON + ICON_GAP))
-    const bunkerX = row1Left + groupW + g1
+    for (let i = 0; i < 3; i++) clubXs.push(leftStart + i * (ICON + ICON_GAP))
+    const bunkerX = leftStart + groupW + g1
     const spinLeft = bunkerX + BUNKER_W + g1
     const spinXs: number[] = []
     for (let i = 0; i < 3; i++) spinXs.push(spinLeft + i * (ICON + ICON_GAP))
 
-    // Row 2: Hit! · meter, centered — but within the width left of the
-    // bottom-right button column (🔍/☰, ~44px + margins) so the meter's right
-    // end doesn't slide under those buttons.
+    // Right cluster: Hit! · meter, packed against the center gap's right edge —
+    // but kept clear of the bottom-right button column (🔍/☰) so the meter's
+    // right end doesn't slide under those buttons.
     const btnGutter = 72
-    const row2W = HIT_W + HIT_METER_GAP + METER_W
-    let rx = Math.max(8, (cw - btnGutter - row2W) / 2)
+    let rx = cx + centerGapHalf
+    const rightEnd = rx + HIT_W + HIT_METER_GAP + METER_W
+    // If it would run under the corner buttons, slide the whole right cluster
+    // left just enough to clear them.
+    const overshoot = Math.max(0, rightEnd - (cw - btnGutter))
+    rx -= overshoot
     const hitX = rx
-    const hitY = row2Y
+    const hitY = rowY
     rx += HIT_W + HIT_METER_GAP
     const meterX = rx, meterW = METER_W
-    const meterY = row2Y + (HIT_H - METER_H) / 2
+    const meterY = rowY + (HIT_H - METER_H) / 2
 
     return {
-      clubXs, clubY: row1Y, spinXs, spinY: row1Y, bunkerX, bunkerY: row1Y,
+      clubXs, clubY: iconY, spinXs, spinY: iconY, bunkerX, bunkerY: iconY,
       hitX, hitY, meterX, meterY, meterW,
-      hitBox: { x: 0, y: row1Y, w: cw, h: ch - row1Y },
+      hitBox: { x: 0, y: rowY, w: cw, h: ch - rowY },
     }
   }
 
@@ -184,7 +308,7 @@ export class SwingEngine {
 
   /** Applies a club/spin HUD click. Hit! goes through pressHit() instead. */
   handleHudClick(region: HudRegion) {
-    if (region.startsWith('club:')) this.club = region.slice(5) as Club
+    if (region.startsWith('club:')) this.setClub(region.slice(5) as Club)
     else if (region.startsWith('spin:')) this.spin = region.slice(5) as Spin
   }
 
@@ -238,31 +362,52 @@ export class SwingEngine {
     this.aimAngle = Math.atan2(rawDy, rawDx)
   }
 
-  // 100%-power projectile preview at aimAngle, g = GRAVITY, no drag/wind/collision.
-  // Putter returns a short horizontal ground ray instead of an arc. For an arc
-  // that goes up first, sampling stops once it's come back down to launch
-  // height (an approximation of "landed") or left world bounds. A shot aimed
-  // level or downward from the start never rises above launch height, so that
-  // condition would trip immediately — instead it's capped by worldH of drop,
-  // enough to draw a clear downward segment without an unbounded line.
-  computeParabolaWorld(ballWx: number, ballWy: number, worldW: number, worldH: number): { x: number; y: number }[] {
+  // 100%-power flight preview at aimAngle. Euler-integrated with the same air
+  // forces the server uses (gravity + wind drag + spin Magnus, via airStep) so the
+  // arc reflects wind and the selected spin — no ground/collision. Putter returns a
+  // short horizontal ground ray instead of an arc. For an arc that goes up first,
+  // sampling stops once it's come back down to launch height (an approximation of
+  // "landed") or left world bounds. A shot aimed level or downward never rises
+  // above launch height, so that condition would trip immediately — instead it's
+  // capped by worldH of drop, enough to draw a clear downward segment.
+  // groundCenterY (optional) samples the world-Y a resting ball's CENTER would
+  // sit at for a given world-X (i.e. terrain surface minus ball radius). When
+  // supplied, the putter guide follows the terrain contour at ball-center height
+  // (item 3) instead of drawing a flat ray. Its length is always the level-ground
+  // 100%-power roll distance (item 4) — it does NOT stretch/shrink for hills.
+  computeParabolaWorld(ballWx: number, ballWy: number, worldW: number, worldH: number, groundCenterY?: (x: number) => number): { x: number; y: number }[] {
     if (this.club === 'putter') {
       const dir = Math.cos(this.aimAngle) >= 0 ? 1 : -1
-      return [{ x: ballWx, y: ballWy }, { x: ballWx + dir * PUTTER_RAY_LEN, y: ballWy }]
+      const len = putterRollDistance(100)
+      const endX = clamp(ballWx + dir * len, 0, worldW)
+      if (!groundCenterY) return [{ x: ballWx, y: ballWy }, { x: endX, y: ballWy }]
+      // Trace the ground contour from the ball to endX so the dashed line hugs
+      // the hills. Step ~ a few world px for a smooth curve without over-sampling.
+      const pts: { x: number; y: number }[] = []
+      const step = 6
+      const total = Math.abs(endX - ballWx)
+      const n = Math.max(1, Math.ceil(total / step))
+      for (let i = 0; i <= n; i++) {
+        const x = ballWx + (endX - ballWx) * (i / n)
+        pts.push({ x, y: groundCenterY(x) })
+      }
+      return pts
     }
 
     // Preview at max power, reduced by the bunker penalty when applicable so the
     // arc visibly shrinks when the ball sits in sand (matches the actual shot).
     let speed = CLUB_MAX_SPEED[this.club]
     if (this.inBunker) speed *= CLUB_BUNKER_PENALTY[this.club]
-    const vx0 = Math.cos(this.aimAngle) * speed, vy0 = Math.sin(this.aimAngle) * speed
-    const pts: { x: number; y: number }[] = [{ x: ballWx, y: ballWy }]
+    let vx = Math.cos(this.aimAngle) * speed, vy = Math.sin(this.aimAngle) * speed
+    let x = ballWx, y = ballWy
+    const spin = spinSign(this.spin)
+    const pts: { x: number; y: number }[] = [{ x, y }]
     const dt = 1 / 60
     let wentUp = false
     for (let i = 1; i <= 600; i++) {
-      const t = i * dt
-      const x = ballWx + vx0 * t
-      const y = ballWy + vy0 * t + 0.5 * GRAVITY * t * t
+      ;({ vx, vy } = airStep(vx, vy, dt, this.windVel, spin))
+      x += vx * dt
+      y += vy * dt
       if (y < ballWy) wentUp = true
       pts.push({ x, y })
       if (x < 0 || x > worldW) break
@@ -306,16 +451,19 @@ export class SwingEngine {
 
   /** Draws the hashed blue aim-zone circle (screen space). Call when aiming is
    * available so the player sees where to grab to aim. */
-  drawAimZone(ctx: CanvasRenderingContext2D, cw: number, ch: number, active = false) {
+  drawAimZone(ctx: CanvasRenderingContext2D, cw: number, ch: number, active = false, color?: string) {
     const z = this.aimZone(cw, ch)
+    // Brighter defaults than before; `color` (a solid pulse color) overrides
+    // when the caller is animating an active aim.
+    const stroke = color ?? (active ? 'rgba(170,225,255,1)' : 'rgba(150,215,255,0.8)')
     ctx.save()
-    ctx.strokeStyle = active ? 'rgba(120,200,255,0.95)' : 'rgba(120,200,255,0.55)'
-    ctx.lineWidth = 2
+    ctx.strokeStyle = stroke
+    ctx.lineWidth = active ? 3 : 2
     ctx.setLineDash([7, 6])
     ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2); ctx.stroke()
     ctx.setLineDash([])
     // A small center tick so the zone reads as an aim target, not just a ring.
-    ctx.fillStyle = 'rgba(120,200,255,0.7)'
+    ctx.fillStyle = stroke
     ctx.beginPath(); ctx.arc(z.x, z.y, 3, 0, Math.PI * 2); ctx.fill()
     ctx.restore()
   }
@@ -357,13 +505,14 @@ export class SwingEngine {
       ctx.fillText(`${pct}%`, px, py)
     }
 
-    // Hit! button — outlined white while a swing is in progress.
+    // Hit! button — outlined white while a swing is in progress; greyed while in
+    // free-look (the meter can't start there — a click just exits free-look).
     const swinging = this.meterPhase !== 'idle'
     ctx.beginPath()
     ctx.roundRect(L.hitX, L.hitY, HIT_W, HIT_H, 6)
-    ctx.fillStyle = 'rgba(128,128,128,0.5)'; ctx.fill()
+    ctx.fillStyle = this.freeLook ? 'rgba(128,128,128,0.25)' : 'rgba(128,128,128,0.5)'; ctx.fill()
     ctx.strokeStyle = swinging ? '#fff' : '#000'; ctx.lineWidth = swinging ? 2 : 1.5; ctx.stroke()
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 12px monospace'
+    ctx.fillStyle = this.freeLook ? 'rgba(255,255,255,0.4)' : '#fff'; ctx.font = 'bold 12px monospace'
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
     ctx.fillText('Hit!', L.hitX + HIT_W / 2, L.hitY + HIT_H / 2 + 1)
 

@@ -59,6 +59,12 @@ export class GameCamera {
   private shotDurMs = 0
   private shotWideZoom = 1
 
+  // Free-look zoom target: on entering free-look we ease toward this (half the
+  // current zoom = 2× the visible course) over a few frames rather than snapping,
+  // mirroring the quick-but-not-instant zoom-back on exit. Only meaningful while
+  // mode === 'free'; update() lerps zoom toward it there.
+  private freeTargetZoom = 1
+
   constructor(cfg: GameCameraConfig = {}) {
     this.cfg = {
       minZoom: cfg.minZoom ?? 0.35,
@@ -94,6 +100,11 @@ export class GameCamera {
   enterFreeLook() {
     if (this.mode === 'free') return
     this.mode = 'free'
+    // Zoom out so free-look surveys 1.5× as much course AREA as follow mode.
+    // Visible area scales with 1/zoom², so 1.5× area = zoom × 1/√1.5 ≈ 0.816.
+    // Eased in quickly over a few frames (see update's free-look branch) rather
+    // than snapping. Respects the min-zoom floor.
+    this.freeTargetZoom = clamp(this.zoom / Math.sqrt(1.5), this.cfg.minZoom, this.cfg.maxZoom)
   }
   exitFreeLook() {
     if (this.mode === 'follow') return
@@ -104,8 +115,15 @@ export class GameCamera {
   toggleFreeLook() { this.mode === 'free' ? this.exitFreeLook() : this.enterFreeLook() }
 
   zoomAt(screenX: number, screenY: number, factor: number) {
+    this.setZoomAnchored(this.zoom * factor, screenX, screenY)
+  }
+
+  /** Sets an absolute zoom (clamped) while keeping the world point under the
+   * given screen coordinate fixed. Shared by pinch/scroll zoom and the eased
+   * free-look zoom-out. */
+  setZoomAnchored(zoom: number, screenX: number, screenY: number) {
     const { wx, wy } = this.screenToWorld(screenX, screenY)
-    this.zoom = clamp(this.zoom * factor, this.cfg.minZoom, this.cfg.maxZoom)
+    this.zoom = clamp(zoom, this.cfg.minZoom, this.cfg.maxZoom)
     this.camX = wx - screenX / this.zoom
     this.camY = wy - screenY / this.zoom
     this.clampCam()
@@ -212,6 +230,14 @@ export class GameCamera {
       this.camX += (tx - this.camX) * this.cfg.followLerp
       this.camY += (ty - this.camY) * this.cfg.followLerp
     } else {
+      // Ease toward the free-look zoom target (set on entry), anchored on the
+      // view center so the course stays put as it opens up — quick, not instant,
+      // matching the zoom-back on exit. Snap the last sliver to settle cleanly.
+      // Faster than the follow zoom-lerp so free-look opens up snappily.
+      if (Math.abs(this.zoom - this.freeTargetZoom) > 1e-3) {
+        const next = this.zoom + (this.freeTargetZoom - this.zoom) * 0.25
+        this.setZoomAnchored(next, this.cw / 2, this.ch / 2)
+      }
       const step = this.cfg.panStep / this.zoom
       if (this.held.has('ArrowLeft')) this.camX -= step
       if (this.held.has('ArrowRight')) this.camX += step
@@ -344,6 +370,8 @@ export interface GameChromeHandle {
   miniStripBox(): { x: number; y: number; w: number; h: number }
   /** Sets the top-left hole/timer HUD text; null hides the pill entirely. */
   setHud(text: string | null): void
+  /** Sets the wind indicator (desktop: in the HUD pill; mobile: bottom-left). mph +right/-left. */
+  setWind(mph: number): void
   /** Portrait only: push live control state into the DOM control bar. No-op in overlay mode. */
   setControls(s: ControlsState): void
   /**
@@ -358,6 +386,9 @@ export interface GameChromeHandle {
   closeMenu(): void
   /** Opens/closes the hamburger menu panel — e.g. for an Escape-key shortcut. */
   toggleMenu(): void
+  /** Recomputes canvas size + camera dims. Call when the screen becomes visible
+   *  again (the resize observers skip while it's hidden). */
+  resize(): void
 }
 
 // True when we should use the portrait-mobile layout (square canvas in a
@@ -395,7 +426,8 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     <div class="gc-mini-strip" data-mini-strip><canvas data-mini-canvas></canvas></div>
     <div class="gc-square" data-square>
       <canvas class="gc-canvas"></canvas>
-      <div class="gc-hud" data-hud><span data-hud-left></span><span data-hud-right></span></div>
+      <div class="gc-hud" data-hud><span data-hud-left></span><span class="gc-hud-wind" data-hud-wind></span><span data-hud-right></span></div>
+      <div class="gc-wind-mobile" data-wind-mobile></div>
       <div class="free-arrows" data-arrows style="display:none">
         <div class="free-hint"><span class="fh-desktop">Free look — Enter, M, Space, or right-click to exit</span><span class="fh-mobile">Free look mode<br>(Please tap the 🔍 to exit)</span></div>
         <button class="free-arrow fa-up" data-pan="up">▲</button>
@@ -445,6 +477,8 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   const hudEl = root.querySelector<HTMLElement>('[data-hud]')!
   const hudLeftEl = root.querySelector<HTMLElement>('[data-hud-left]')!
   const hudRightEl = root.querySelector<HTMLElement>('[data-hud-right]')!
+  const hudWindEl = root.querySelector<HTMLElement>('[data-hud-wind]')!
+  const windMobileEl = root.querySelector<HTMLElement>('[data-wind-mobile]')!
   const arrowsEl = root.querySelector<HTMLElement>('[data-arrows]')!
   const menuToggleEl = root.querySelector<HTMLButtonElement>('[data-menu-toggle]')!
   const menuPanelEl = root.querySelector<HTMLElement>('[data-menu-panel]')!
@@ -629,6 +663,14 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   }
 
   function resize() {
+    // Skip while the screen is hidden (display:none — e.g. the Ken menu is open):
+    // a hidden element measures 0×0, and resizing to that zero/minW fallback would
+    // leave the camera zoomed wrong until the next real resize. A resize() is
+    // re-fired when the game screen re-enters (see the returned handle), so we lose
+    // nothing by ignoring the hidden state here. host is the always-in-flow parent,
+    // so its 0×0 reliably means "an ancestor is display:none".
+    if (host.clientWidth === 0 && host.clientHeight === 0) return
+
     portrait = isPortraitMobile()
     root.classList.toggle('gc-portrait', portrait)
     // Portrait sits ~50% more zoomed out (baseZoom 0.66) so the small square
@@ -699,7 +741,7 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     },
     setHud(text: string | null) {
       hudEl.style.display = text === null ? 'none' : ''
-      if (text === null) return
+      if (text === null) { windMobileEl.textContent = ''; return }
       // Split "Hole 1/9    ⏱ 2.5s" into a left (hole) and right (time) part so
       // the pill can span the top with the center free (portrait: the up-arrow
       // sits in the center gap). The ⏱ marks the boundary.
@@ -711,6 +753,22 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
         hudLeftEl.textContent = text.trim()
         hudRightEl.textContent = ''
       }
+    },
+    setWind(mph: number) {
+      // "Wind: →→ 5 mph" — arrow points in the wind's direction, its length grows
+      // with strength (one glyph per ~4 mph, min one when non-zero). At 0 mph no
+      // arrow. Shown desktop top-left (in the HUD pill) and mobile bottom-left.
+      const n = Math.round(mph)
+      let txt: string
+      if (n === 0) {
+        txt = 'Wind: 0 mph'
+      } else {
+        const glyph = n > 0 ? '→' : '←'
+        const len = Math.min(6, Math.max(1, Math.round(Math.abs(n) / 4)))
+        txt = `Wind: ${glyph.repeat(len)} ${Math.abs(n)} mph`
+      }
+      hudWindEl.textContent = txt
+      windMobileEl.textContent = txt
     },
     setControls(s: ControlsState) {
       if (!portrait) return
@@ -726,5 +784,6 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     sync: applySync,
     closeMenu() { menuPanelEl.style.display = 'none' },
     toggleMenu,
+    resize,
   }
 }

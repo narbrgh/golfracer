@@ -81,6 +81,7 @@ type stateMsg struct {
 	X       float64 `json:"x"`
 	Y       float64 `json:"y"`
 	Resting bool    `json:"resting"`
+	Wind    float64 `json:"wind"` // current hole's wind, mph (+right / -left)
 }
 
 type eventMsg struct {
@@ -90,6 +91,7 @@ type eventMsg struct {
 	Y     float64 `json:"y"`
 	VX    float64 `json:"vx,omitempty"`
 	VY    float64 `json:"vy,omitempty"`
+	Wind  float64 `json:"wind,omitempty"` // hole wind, mph — set on reset (new hole = new wind)
 }
 
 // clientMsg covers shoot, course (live preview), selectHole, reset, and
@@ -101,6 +103,7 @@ type clientMsg struct {
 	Tee  string          `json:"tee"`
 	Hole int             `json:"hole"` // active hole index for "course"/"selectHole"
 	Club string          `json:"club"` // driver | wedge | putter — which club fired this "shoot"
+	Spin string          `json:"spin"` // back | none | top — spin on this "shoot"
 	Data json.RawMessage `json:"data"`
 }
 
@@ -353,6 +356,12 @@ func main() {
 	// each substep — governs the club penalty applied on the next "shoot".
 	inBunker := false
 
+	// Current hole's wind in mph (+right / -left). Re-rolled whenever the hole
+	// (re)loads in setActive; applied to each shot's flight and reported to the
+	// client for the wind indicator. Rolled once here for the initial tee hole,
+	// which is set up directly (not via setActive).
+	windMph := physics.RollHoleWindMph()
+
 	// Soft-lock diagnostics: if the ball stays not-resting but confined to a
 	// small region (frozen OR bouncing in place) for a sustained window, dump
 	// the exact ball state + nearby edges so the geometry can be reproduced.
@@ -419,6 +428,7 @@ func main() {
 		inBunker = false
 		ball = physics.NewBall(hole.TeeBackX, startY(), 10)
 		lastNonWaterX = hole.TeeBackX
+		windMph = physics.RollHoleWindMph()
 	}
 
 	h := &hub{clients: make(map[*websocket.Conn]struct{})}
@@ -448,7 +458,7 @@ func main() {
 				inHoleTicks--
 				if inHoleTicks == 0 {
 					ball = physics.NewBall(hole.TeeBackX, startY(), 10)
-					emit(eventMsg{Type: "event", Event: "reset", X: ball.X, Y: ball.Y})
+					emit(eventMsg{Type: "event", Event: "reset", X: ball.X, Y: ball.Y, Wind: windMph})
 				}
 
 			case sinkTicks > 0:
@@ -600,7 +610,7 @@ func main() {
 			// produces nothing (rest = silence).
 			moving := !state.Resting
 			if !haveSent || moving || state.X != lastSentX || state.Y != lastSentY || state.Resting != lastSentResting {
-				emit(stateMsg{Type: "state", X: state.X, Y: state.Y, Resting: state.Resting})
+				emit(stateMsg{Type: "state", X: state.X, Y: state.Y, Resting: state.Resting, Wind: windMph})
 				lastSentX, lastSentY, lastSentResting = state.X, state.Y, state.Resting
 				haveSent = true
 			}
@@ -622,7 +632,7 @@ func main() {
 		// The loop is silent while the ball rests, so a fresh client wouldn't learn
 		// where the ball is. Send it the current position immediately.
 		ballMu.Lock()
-		snap := stateMsg{Type: "state", X: ball.X, Y: ball.Y, Resting: ball.Resting}
+		snap := stateMsg{Type: "state", X: ball.X, Y: ball.Y, Resting: ball.Resting, Wind: windMph}
 		ballMu.Unlock()
 		if b, err := json.Marshal(snap); err == nil {
 			conn.WriteMessage(websocket.TextMessage, b)
@@ -661,7 +671,7 @@ func main() {
 						vx *= mult
 						vy *= mult
 					}
-					ball.Shoot(vx, vy)
+					ball.Shoot(vx, vy, physics.SpinValue(msg.Spin), physics.WindVelFromMph(windMph), msg.Club == "putter")
 					fired = true
 					fvx, fvy, fx, fy = vx, vy, ball.X, ball.Y
 				}
@@ -678,9 +688,9 @@ func main() {
 					c = coursestore.Normalize(c)
 					ballMu.Lock()
 					setActive(c, msg.Hole)
-					rx, ry := ball.X, ball.Y
+					rx, ry, rw := ball.X, ball.Y, windMph
 					ballMu.Unlock()
-					h.broadcastJSON(eventMsg{Type: "event", Event: "reset", X: rx, Y: ry})
+					h.broadcastJSON(eventMsg{Type: "event", Event: "reset", X: rx, Y: ry, Wind: rw})
 					log.Printf("course preview: id=%q holes=%d activeHole=%d", c.ID, len(c.Holes), msg.Hole)
 				}
 			case "selectHole":
@@ -688,9 +698,9 @@ func main() {
 				// geometry (used for hole navigation).
 				ballMu.Lock()
 				setActive(activeCourse, msg.Hole)
-				rx, ry := ball.X, ball.Y
+				rx, ry, rw := ball.X, ball.Y, windMph
 				ballMu.Unlock()
-				h.broadcastJSON(eventMsg{Type: "event", Event: "reset", X: rx, Y: ry})
+				h.broadcastJSON(eventMsg{Type: "event", Event: "reset", X: rx, Y: ry, Wind: rw})
 			case "reset":
 				ballMu.Lock()
 				inHoleTicks = 0
@@ -845,7 +855,18 @@ func main() {
 			}
 			ballMu.Lock()
 			physics.Current = t
+			// Wind is normally rolled once per hole, so a wind-override change from
+			// the Ken menu wouldn't be felt until the next hole. Apply it to the
+			// CURRENT hole immediately: when the override is on, force the current
+			// wind to the override value (so the HUD + next shot reflect it at once).
+			if t.WindOverrideOn != 0 {
+				windMph = t.WindOverrideMph
+			}
+			snap := stateMsg{Type: "state", X: ball.X, Y: ball.Y, Resting: ball.Resting, Wind: windMph}
 			ballMu.Unlock()
+			// Push a state frame so the wind HUD updates at once, even while the ball
+			// rests (the tick loop is silent at rest, so it wouldn't otherwise).
+			h.broadcastJSON(snap)
 			log.Printf("physics config updated: %+v", t)
 			writeJSON(w, t)
 		default:
@@ -936,6 +957,7 @@ func main() {
 				VX       float64 `json:"vx"`
 				VY       float64 `json:"vy"`
 				Club     string  `json:"club"`
+				Spin     string  `json:"spin"`
 			}
 			if json.Unmarshal(data, &msg) != nil {
 				continue
@@ -1012,7 +1034,7 @@ func main() {
 					roomMgr.BeginMatch(roomID, holes)
 				}
 			case "shoot":
-				roomMgr.MatchShoot(pid, msg.VX, msg.VY, msg.Club)
+				roomMgr.MatchShoot(pid, msg.VX, msg.VY, msg.Club, msg.Spin)
 			case "matchReturn":
 				roomMgr.MatchReturn(pid)
 			}

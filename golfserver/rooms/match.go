@@ -80,6 +80,7 @@ type shootCmd struct {
 	playerID int
 	vx, vy   float64
 	club     string // driver | wedge | putter — for the (future) bunker penalty
+	spin     string // back | none | top
 }
 
 type Match struct {
@@ -90,6 +91,7 @@ type Match struct {
 
 	phase        MatchPhase
 	holeIdx      int
+	windMph      float64 // current hole's wind (mph, +right/-left); rolled in loadHole
 	tick         uint64
 	phaseEnds    uint64 // tick a timed phase ends (countdown/intermission/results)
 	holeStart    uint64 // tick the current hole's play began
@@ -250,7 +252,7 @@ func (mt *Match) applyShoot(c shootCmd) {
 			k := maxShotSpeed / s
 			vx, vy = vx*k, vy*k
 		}
-		b.ball.Shoot(vx, vy)
+		b.ball.Shoot(vx, vy, physics.SpinValue(c.spin), physics.WindVelFromMph(mt.windMph), c.club == "putter")
 		return
 	}
 }
@@ -258,6 +260,7 @@ func (mt *Match) applyShoot(c shootCmd) {
 // loadHole builds geometry for a hole and (re)spawns all balls at its tee.
 func (mt *Match) loadHole(idx int) {
 	mt.holeIdx = idx
+	mt.windMph = physics.RollHoleWindMph()
 	hole := mt.holes[idx]
 	mt.geom = holegeom.Build(hole)
 
@@ -505,6 +508,7 @@ func (mt *Match) sendHole(idx int) {
 		"holeIndex": idx,
 		"holeCount": len(mt.holes),
 		"hole":      mt.holes[idx],
+		"wind":      mt.windMph,
 	})
 }
 
@@ -544,6 +548,7 @@ func (mt *Match) broadcastState() {
 		"phaseMsLeft": msLeft,
 		"holeMs":    holeMs,
 		"balls":     balls,
+		"wind":      mt.windMph,
 	})
 }
 
@@ -612,16 +617,16 @@ func (m *Manager) BeginMatch(roomID string, holes []terrain.Hole) {
 }
 
 // MatchShoot routes a shot to the shooter's ball in their room's match. club is
-// the firing club (driver|wedge|putter); it is carried through for the bunker
-// penalty (not yet applied in the match loop — see applyShoot).
-func (m *Manager) MatchShoot(playerID int, vx, vy float64, club string) {
+// the firing club (driver|wedge|putter); spin is back|none|top. Both are carried
+// through to applyShoot (club for the bunker penalty, spin for flight physics).
+func (m *Manager) MatchShoot(playerID int, vx, vy float64, club, spin string) {
 	m.mu.Lock()
 	roomID := m.playerRoom[playerID]
 	mt := m.matches[roomID]
 	m.mu.Unlock()
 	if mt != nil {
 		select {
-		case mt.shoots <- shootCmd{playerID: playerID, vx: vx, vy: vy, club: club}:
+		case mt.shoots <- shootCmd{playerID: playerID, vx: vx, vy: vy, club: club, spin: spin}:
 		default:
 		}
 	}

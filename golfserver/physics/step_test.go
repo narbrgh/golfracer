@@ -144,7 +144,7 @@ func TestVSweepRollIn(t *testing.T) {
 			NewEdge(0, 250, half, 400),      // far terrain wall
 		}
 		ball := NewBall(-250, 390, 10)
-		ball.Shoot(180, 0) // roll right into the V
+		ball.Shoot(180, 0, 0, 0, false) // roll right into the V
 		restedAt, flickered, wasResting := -1, false, false
 		for i := 0; i < 500; i++ {
 			ball.Tick(dt, edges, -1e6, 1e6, -1e9)

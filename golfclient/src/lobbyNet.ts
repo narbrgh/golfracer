@@ -22,12 +22,14 @@ export interface MatchState {
   phaseMsLeft: number
   holeMs: number
   balls: MatchBall[]
+  wind: number // current hole wind, mph (+right / -left)
 }
 
 export interface MatchHole {
   holeIndex: number
   holeCount: number
   hole: Hole
+  wind: number // current hole wind, mph (+right / -left)
 }
 
 export interface LeaderEntry {
@@ -155,6 +157,6 @@ export class LobbyNet {
   setCourse(courseId: string): void { this.send({ type: 'setCourse', courseId }) }
   setVictory(victory: string): void { this.send({ type: 'setVictory', victory }) }
   start(): void { this.send({ type: 'start' }) }
-  shoot(vx: number, vy: number, club: string): void { this.send({ type: 'shoot', vx, vy, club }) }
+  shoot(vx: number, vy: number, club: string, spin: string): void { this.send({ type: 'shoot', vx, vy, club, spin }) }
   matchReturn(): void { this.send({ type: 'matchReturn' }) }
 }

@@ -2,7 +2,7 @@ import { buildSegments, terrainY, hexWithAlpha, buildSpline, splineY, waterPoolB
 import type { Course, Hole, BuiltSegment, SplineCoeff, Platform } from './terrain'
 import { initEditor } from './editor'
 import { listCourses, getCourse, newCourse } from './courseapi'
-import { SwingEngine, formatDistance } from './swing'
+import { SwingEngine, formatDistance, WIND_MPH_SCALE } from './swing'
 import { GameCamera, mountGameChrome } from './gameCamera'
 import './gameChrome.css'
 
@@ -182,7 +182,7 @@ const chrome = mountGameChrome(host, cam, {
   // Portrait-mobile DOM controls drive the same SwingEngine as the keyboard
   // shortcuts / on-canvas HUD taps.
   onHit: () => pressHitShortcut(),
-  onClub: (c) => { swing.club = c as typeof swing.club },
+  onClub: (c) => { swing.setClub(c as typeof swing.club) },
   onSpin: (s) => { swing.spin = s as typeof swing.spin },
 })
 const canvas = chrome.canvas
@@ -279,6 +279,9 @@ let restingDebounceStart: number | null = null
 let trulyResting = true, shotAllowedAt = 0
 let showingHole = false
 let inWaterPenalty = false, inWaterSinking = false, waterSinkStartMs = 0
+// Current hole's wind (mph, +right / -left), from the server's state/reset
+// messages. Drives the wind indicator and the preview parabola.
+let windMph = 0
 let holeStartMs = Date.now() // for the hole/timer HUD readout — visual parity only, not scored
 
 // The ball is settled and past its post-shot cooldown — the parabola preview
@@ -300,13 +303,26 @@ function canShootNow() { return cam.mode === 'follow' && canPreviewShot() }
 // this is about cursor travel on screen, not world distance.
 let aiming = false, aimEngaged = false
 let aimStartSx = 0, aimStartSy = 0, aimCurSx = 0, aimCurSy = 0
-const AIM_DRAG_COLOR = 'rgba(120,200,255,0.9)'
+const AIM_DRAG_COLOR = 'rgba(150,215,255,1)'
 const AIM_DEADZONE_R = BALL_RADIUS * 4
+
+// While actively changing the angle, the aim guides pulse between a bright and a
+// near-white cyan on a slow (~1.6s) sine so they read as "live". Returns an rgba
+// string; call per frame with the current time.
+const AIM_PULSE_MS = 1600
+function aimPulseColor(nowMs: number): string {
+  const t = (Math.sin((nowMs / AIM_PULSE_MS) * Math.PI * 2) + 1) / 2 // 0..1
+  // Lerp blue (150,215,255) -> bright white-cyan (225,245,255).
+  const r = Math.round(150 + t * 75)
+  const g = Math.round(215 + t * 30)
+  const b = 255
+  return `rgb(${r},${g},${b})`
+}
 
 const swing = new SwingEngine({ ballColorHex: '#fff' })
 
 function launch(vx: number, vy: number) {
-  ws.send(JSON.stringify({ type: 'shoot', vx, vy, club: swing.club }))
+  ws.send(JSON.stringify({ type: 'shoot', vx, vy, club: swing.club, spin: swing.spin }))
   // Auto-zoom out to capture the trajectory from here; eases back in once the
   // ball settles (see the rest-detection in tick()). GRAVITY matches the server.
   cam.startShot(vx, vy, 1500)
@@ -565,22 +581,29 @@ function draw() {
   // Hit mode and free-look (so you can survey the shot from a wider view). It's
   // drawn in the aim-drag color only while a drag has actually moved the angle
   // (past the dead-zone); otherwise (including the idle non-dragging case) it's white.
-  const parabolaPts = canPreviewShot() ? swing.computeParabolaWorld(ballX, ballY, hole.worldW, hole.worldH) : null
-  const parabolaColor = aiming && aimEngaged ? AIM_DRAG_COLOR : 'rgba(255,255,255,0.85)'
+  // While actively changing the angle, the aim guides glow with a slow pulse;
+  // otherwise they use the steady bright blue.
+  const engaged = aiming && aimEngaged
+  const aimColor = engaged ? aimPulseColor(Date.now()) : AIM_DRAG_COLOR
+
+  const parabolaPts = canPreviewShot()
+    ? swing.computeParabolaWorld(ballX, ballY, hole.worldW, hole.worldH, (x) => tY(x) - BALL_RADIUS)
+    : null
+  const parabolaColor = engaged ? aimColor : 'rgba(255,255,255,0.85)'
   if (parabolaPts) swing.drawParabolaWorld(ctx, parabolaPts, cam.zoom, parabolaColor)
 
   ctx.restore()
 
   // Central aim zone — the hashed blue circle where a drag starts an aim (drags
   // outside it pan the view). Shown whenever aiming is available, highlighted
-  // while actively aiming.
-  if (canShootNow()) swing.drawAimZone(ctx, cam.cw, cam.ch, aiming && aimEngaged)
+  // (and pulsing) while actively aiming.
+  if (canShootNow()) swing.drawAimZone(ctx, cam.cw, cam.ch, engaged, engaged ? aimColor : undefined)
 
   if (aiming) {
-    ctx.strokeStyle = aimEngaged ? AIM_DRAG_COLOR : 'rgba(255,60,60,0.85)'; ctx.lineWidth = 2
+    ctx.strokeStyle = aimEngaged ? aimColor : 'rgba(255,60,60,0.85)'; ctx.lineWidth = 2
     ctx.beginPath(); ctx.arc(aimStartSx, aimStartSy, AIM_DEADZONE_R, 0, Math.PI * 2); ctx.stroke()
 
-    ctx.strokeStyle = AIM_DRAG_COLOR; ctx.lineWidth = 2
+    ctx.strokeStyle = aimColor; ctx.lineWidth = 2
     ctx.setLineDash([3, 3])
     ctx.beginPath(); ctx.moveTo(aimStartSx, aimStartSy); ctx.lineTo(aimCurSx, aimCurSy); ctx.stroke()
     ctx.setLineDash([])
@@ -622,6 +645,7 @@ function draw() {
 function updateHud() {
   const elapsed = ((Date.now() - holeStartMs) / 1000).toFixed(1)
   chrome.setHud(`Hole ${activeHole + 1}/${courseData.holes.length}    ⏱ ${elapsed}s`)
+  chrome.setWind(windMph)
 }
 
 // ---- Loop ----
@@ -631,6 +655,14 @@ function tick() {
   // not while it's still flying over the sand (canPreviewShot gates the parabola
   // preview the same way).
   swing.inBunker = canPreviewShot() && ballInBunker()
+  swing.freeLook = cam.mode === 'free'
+  swing.windVel = windMph * WIND_MPH_SCALE
+  // Keep the swing engine's cup/ball anchors current so selecting the putter can
+  // auto-aim toward the hole from wherever the ball lies (item 2), and re-aim the
+  // putter each time the ball settles (so a putt past the cup flips back toward it).
+  swing.holeX = hole.holeX
+  swing.ballX = physBallX
+  swing.setReady(canPreviewShot())
   swing.update(Date.now())
   ballX += (physBallX - ballX) * BALL_LERP
   ballY += (physBallY - ballY) * BALL_LERP
@@ -678,7 +710,13 @@ canvas.addEventListener('pointerdown', (e) => {
 
     const hud = swing.hitTestHud(cx, cy, cam.cw, cam.ch, chrome.insets)
     if (hud) {
-      if (hud === 'hit') pressHitShortcut()
+      if (hud === 'hit') {
+        // In free-look the meter can't start (you must be aiming in follow
+        // mode). Rather than a no-op, a Hit! click exits free-look so the next
+        // click starts the swing — mirrors the mobile DOM control.
+        if (cam.mode === 'free') { cam.exitFreeLook(); chrome.sync() }
+        else pressHitShortcut()
+      }
       else swing.handleHudClick(hud)
       return
     }
@@ -795,7 +833,8 @@ function onState(x: number, y: number, resting: boolean) {
   prevResting = resting
 }
 
-function onEvent(m: { event: string; x: number; y: number; vx?: number; vy?: number }) {
+function onEvent(m: { event: string; x: number; y: number; vx?: number; vy?: number; wind?: number }) {
+  if (typeof m.wind === 'number') windMph = m.wind
   switch (m.event) {
     case 'shotFired':
       // Clear any transient hold so the ball starts following its new flight.
@@ -833,7 +872,10 @@ function onEvent(m: { event: string; x: number; y: number; vx?: number; vy?: num
 ws.onmessage = (e) => {
   const m = JSON.parse(e.data)
   if (m.type === 'event') onEvent(m)
-  else onState(m.x, m.y, m.resting)  // "state" (also the plain connect snapshot)
+  else {
+    if (typeof m.wind === 'number') windMph = m.wind
+    onState(m.x, m.y, m.resting)  // "state" (also the plain connect snapshot)
+  }
 }
 
 ws.onclose = () => {
@@ -875,9 +917,9 @@ function onKeyDown(e: KeyboardEvent) {
   if (e.key === 'Escape') { e.preventDefault(); chrome.toggleMenu(); return }
   if (cam.onKeyDown(e)) { e.preventDefault(); chrome.sync(); return }
   if (e.key === ' ') { e.preventDefault(); pressHitShortcut(); return }
-  if (e.key === '1') { swing.club = 'driver'; return }
-  if (e.key === '2') { swing.club = 'wedge'; return }
-  if (e.key === '3') { swing.club = 'putter'; return }
+  if (e.key === '1') { swing.setClub('driver'); return }
+  if (e.key === '2') { swing.setClub('wedge'); return }
+  if (e.key === '3') { swing.setClub('putter'); return }
   if (e.key === '4') { swing.spin = 'back'; return }
   if (e.key === '5') { swing.spin = 'none'; return }
   if (e.key === '6') { swing.spin = 'top'; return }
@@ -916,7 +958,13 @@ if (opts.openEditor) editor.show()
 
 return {
   openEditor: () => editor.show(),
-  onEnter() { window.addEventListener('keydown', onKeyDown); window.addEventListener('keyup', onKeyUp) },
+  onEnter() {
+    window.addEventListener('keydown', onKeyDown); window.addEventListener('keyup', onKeyUp)
+    // The resize observers skip while this screen is hidden (e.g. the Ken menu was
+    // open), so re-measure now that it's visible — otherwise the camera can keep a
+    // stale (zoomed-out) size from when it was hidden.
+    chrome.resize()
+  },
   onExit() {
     window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp)
     cam.exitFreeLook()

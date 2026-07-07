@@ -1,6 +1,46 @@
 package physics
 
-import "math"
+import (
+	"math"
+	"math/rand"
+)
+
+// SpinValue maps a client spin string to the internal spin sign used by Tick's
+// Magnus + landing-bite physics: backspin -1, topspin +1, anything else 0.
+func SpinValue(spin string) int {
+	switch spin {
+	case "back":
+		return -1
+	case "top":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// WindVelFromMph converts a wind reading in mph (the display label) into the
+// horizontal air velocity (px/s) the ball's flight is subject to, via the live
+// WindMphScale tunable.
+func WindVelFromMph(mph float64) float64 { return mph * Current.WindMphScale }
+
+// RollHoleWindMph produces a hole's wind in mph. When the WindOverrideOn tunable
+// is set it returns the fixed WindOverrideMph (for testing a known wind); otherwise
+// it rolls a bell-curve value clamped to ±20 mph and rounds to a whole number for a
+// clean HUD readout.
+func RollHoleWindMph() float64 {
+	if Current.WindOverrideOn != 0 {
+		return Current.WindOverrideMph
+	}
+	// NormFloat64 is a true Gaussian; scale so ±20 is ~3σ (rarely clamped), then
+	// round to whole mph.
+	v := rand.NormFloat64() * (20.0 / 3.0)
+	if v > 20 {
+		v = 20
+	} else if v < -20 {
+		v = -20
+	}
+	return math.Round(v)
+}
 
 // Tunables holds the ball-physics constants that are safe to tweak live, from
 // the client's Ken debug menu, without a server restart. Field values default
@@ -19,6 +59,14 @@ type Tunables struct {
 	DriverPenalty      float64 `json:"driverPenalty"`      // shot-power multiplier when hitting a driver out of a bunker
 	WedgePenalty       float64 `json:"wedgePenalty"`       // shot-power multiplier when hitting a pitching wedge out of a bunker
 	PutterPenalty      float64 `json:"putterPenalty"`      // shot-power multiplier when hitting a putter out of a bunker
+
+	// --- Air / spin (wind, topspin, backspin) ---
+	AirDrag         float64 `json:"airDrag"`         // 1/s — air-drag coefficient; force = -AirDrag*(v - airVel). 0 = no drag.
+	WindMphScale    float64 `json:"windMphScale"`    // px/s of air velocity per 1 mph of wind (mph is a display label)
+	SpinMagnus      float64 `json:"spinMagnus"`      // 1/s — Magnus turn rate: perpendicular accel = SpinMagnus*speed per spin unit
+	SpinLandingBite float64 `json:"spinLandingBite"` // 0-1 — how much backspin kills / topspin boosts forward speed on the landing bounce
+	WindOverrideOn  float64 `json:"windOverrideOn"`  // 0/1 — when 1, every hole uses WindOverrideMph instead of a random wind
+	WindOverrideMph float64 `json:"windOverrideMph"` // forced wind in mph (+right / -left) when WindOverrideOn is 1
 }
 
 // DefaultTunables returns the game's original hardcoded tuning, used both as
@@ -26,16 +74,26 @@ type Tunables struct {
 func DefaultTunables() Tunables {
 	return Tunables{
 		Gravity:            1500.0,
-		GroundRestitution:  0.55,
-		BounceFriction:     0.85,
+		GroundRestitution:  0.5,
+		BounceFriction:     0.7,
 		WallRestitution:    0.65,
-		RollingFriction:    200.0,
-		StaticFriction:     400.0,
+		RollingFriction:    400.0,
+		StaticFriction:     600.0,
 		RestSpeedThreshold: 8.0,
-		BunkerFriction:     800.0, // px/s² — sand grabs hard (4× grass's RollingFriction) so the ball doesn't roll far
+		BunkerFriction:     800.0, // px/s² — sand grabs hard (2× grass's RollingFriction) so the ball doesn't roll far
 		DriverPenalty:      0.25,
 		WedgePenalty:       0.7,
 		PutterPenalty:      0.5,
+
+		// Air/spin defaults. Wind is the stronger effect (higher AirDrag +
+		// WindMphScale so it pushes the ball noticeably); spin is subtler (lower
+		// Magnus + landing bite) — it shapes the arc and landing without dominating.
+		AirDrag:         0.22,
+		WindMphScale:    55.0,
+		SpinMagnus:      0.30,
+		SpinLandingBite: 0.30,
+		WindOverrideOn:  0,
+		WindOverrideMph: 0,
 	}
 }
 
@@ -95,6 +153,12 @@ const (
 	// smooth-redirect the ball's speed up a near-vertical face, producing the
 	// bounce/climb/bounce oscillation seen on steep terrain. cos(50°) ≈ 0.64.
 	rollContinuityDot = 0.64
+
+	// backspinExtraDrag scales AirDrag as extra horizontal decel on backspun shots
+	// only, so backspin lands SHORTER than no-spin (it trades carry for check-up).
+	// Fixed identity constant, not a live-tunable feel knob. Mirrored client-side in
+	// swing.ts BACKSPIN_EXTRA_DRAG — keep the two equal.
+	backspinExtraDrag = 0.6
 )
 
 // Edge is a line segment used for ball collision. It is the single geometric
@@ -210,20 +274,41 @@ type Ball struct {
 	wedgeTicks     int     // consecutive ticks blocked in place (see wedge detection)
 	noTouchTicks   int     // consecutive ticks with no edge contact at all
 	stillTime      float64 // seconds spent continuously below Current.RestSpeedThreshold near contact
+
+	// Set at Shoot time and held for the flight of the current shot.
+	Spin    int     // -1 backspin, 0 none, +1 topspin — drives Magnus + landing bite
+	WindVel float64 // horizontal air velocity (px/s, +right) the ball's flight sees; drag pulls toward it
 }
 
 func NewBall(x, y, radius float64) *Ball {
 	return &Ball{X: x, Y: y, Radius: radius, Resting: true, prevTX: 1}
 }
 
-// Shoot launches the ball. No-op if ball is not resting.
-func (b *Ball) Shoot(vx, vy float64) {
+// Shoot launches the ball. No-op if ball is not resting. spin is -1 (backspin),
+// 0 (none), or +1 (topspin); windVel is the horizontal air velocity (px/s, +right)
+// this shot's flight is subject to (already converted from mph by the caller).
+// grounded marks a shot that never leaves the ground (a putt): it starts with
+// airTicks == 0 so the ball's first floor contact is treated as a smooth rolling
+// continuation rather than a fresh landing — otherwise the tick-one gravity
+// injection can read as a hard bounce and the putt visibly hops off the tee.
+func (b *Ball) Shoot(vx, vy float64, spin int, windVel float64, grounded bool) {
 	if !b.Resting {
 		return
 	}
 	b.Resting = false
 	b.VX, b.VY = vx, vy
-	b.airTicks = 1
+	b.Spin = spin
+	b.WindVel = windVel
+	if grounded {
+		b.airTicks = 0
+		// Seed prevTX/prevTY along +x so the first floor contact's continuity check
+		// passes: floor edges are oriented left-to-right, so their tangent fT ≈
+		// (+cos slope, +sin slope) — a +x seed gives dot = cos(slope) ≥ rollContinuityDot
+		// for any playable slope, regardless of whether the putt travels left or right.
+		b.prevTX, b.prevTY = 1, 0
+	} else {
+		b.airTicks = 1
+	}
 	b.stillTime = 0
 	b.noTouchTicks = 0
 }
@@ -256,6 +341,49 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 	startX, startY := b.X, b.Y
 
 	b.VY += Current.Gravity * dt
+
+	// Air forces — only while airborne (airTicks > 0). A rolling/putting ball has
+	// airTicks == 0, so wind and spin never touch it on the ground, as designed.
+	if b.airTicks > 0 {
+		// Air drag relative to the moving air. The air has horizontal velocity
+		// b.WindVel and no vertical velocity, so drag pulls the ball's horizontal
+		// speed toward the wind and damps its vertical speed. This is what makes
+		// wind push the ball, and — because it acts over time — a ball that stays
+		// aloft longer (backspin) drifts more while a diving ball (topspin) drifts
+		// less, with no explicit spin×wind term.
+		if Current.AirDrag > 0 {
+			b.VX += -Current.AirDrag * (b.VX - b.WindVel) * dt
+			b.VY += -Current.AirDrag * b.VY * dt
+		}
+		// Magnus force: perpendicular to velocity, magnitude ∝ speed. For a
+		// mostly-horizontal shot this lifts a backspun ball (Spin=-1) and pushes a
+		// topspun ball (Spin=+1) down; rotating the velocity vector keeps it correct
+		// on steep/downward shots too.
+		if b.Spin != 0 && Current.SpinMagnus > 0 {
+			speed := math.Hypot(b.VX, b.VY)
+			if speed > 1 {
+				if b.Spin > 0 {
+					// Topspin: perpendicular Magnus — rotate the unit velocity -90° and
+					// push along it, so a mostly-horizontal shot dives (+Y). Unchanged.
+					ux, uy := b.VX/speed, b.VY/speed
+					px, py := -uy, ux
+					mag := float64(b.Spin) * Current.SpinMagnus * speed * dt
+					b.VX += px * mag
+					b.VY += py * mag
+				} else {
+					// Backspin: LIFT ONLY (no free forward carry) plus a little extra
+					// horizontal drag, so it flies higher/steeper and lands SHORTER than
+					// no-spin — trading distance for the landing check-up (the landing
+					// bite below). `lift` matches the magnitude of the old perpendicular
+					// push, applied straight up (-Y) at any flight angle.
+					lift := Current.SpinMagnus * speed * dt
+					b.VY -= lift
+					b.VX += -backspinExtraDrag * Current.AirDrag * (b.VX - b.WindVel) * dt
+				}
+			}
+		}
+	}
+
 	b.X += b.VX * dt
 	b.Y += b.VY * dt
 
@@ -351,9 +479,32 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 			// enough speed to bounce rather than settle.
 			vn = -vn * e.Restitution
 			vt *= e.BounceFric
+			// Spin landing bite — applied ONCE, on the real landing from the air
+			// (airTicks>0), as a bounded adjustment to the forward roll and then the
+			// spin is spent (cleared) so it can't compound on later skips/bounces.
+			// Physically: topspin adds forward roll (the ball "grabs and runs"),
+			// backspin removes it (the ball "checks up"). The adjustment is scaled by
+			// the current forward speed, so it can shorten a fast roll to a stop but
+			// never reverse it or accelerate it past its landing speed.
+			if b.airTicks > 0 && b.Spin != 0 {
+				// Signed forward direction along the surface = sign of vt (the ball's
+				// own tangential travel). Adjust magnitude toward/away from forward.
+				fwd := 1.0
+				if vt < 0 {
+					fwd = -1.0
+				}
+				mag := math.Abs(vt)
+				mag += float64(b.Spin) * Current.SpinLandingBite * mag
+				if mag < 0 {
+					mag = 0 // backspin bite can stop the roll, not reverse it
+				}
+				vt = fwd * mag
+				b.Spin = 0 // spin is spent on the landing impact
+			}
 		} else {
 			// Soft landing / gentle contact.
 			vn = 0
+			b.Spin = 0 // touched down gently — spin is spent, no Magnus after this
 		}
 
 		rollingFriction := Current.RollingFriction

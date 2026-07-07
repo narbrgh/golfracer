@@ -43,7 +43,7 @@ const SERVER_FIELDS: FieldSpec[] = [
 ]
 
 const BUNKER_FIELDS: FieldSpec[] = [
-  { key: 'bunkerFriction', label: 'Bunker Friction', description: 'px/s² kinetic deceleration while rolling in a bunker. For reference grass (Rolling Friction) is 200 — set this ABOVE that for grabby sand.', step: 10, min: 0, max: 3000 },
+  { key: 'bunkerFriction', label: 'Bunker Friction', description: 'px/s² kinetic deceleration while rolling in a bunker. For reference grass (Rolling Friction) is 400 — set this ABOVE that for grabby sand.', step: 10, min: 0, max: 3000 },
 ]
 
 const PENALTY_FIELDS: FieldSpec[] = [
@@ -52,13 +52,25 @@ const PENALTY_FIELDS: FieldSpec[] = [
   { key: 'putterPenalty', label: 'Putter Penalty', description: '0-1 — shot power is multiplied by this when hitting a putter out of a bunker', step: 0.01, min: 0, max: 1 },
 ]
 
+const SPIN_FIELDS: FieldSpec[] = [
+  { key: 'spinMagnus', label: 'Spin Magnus', description: '1/s — spin turn rate. Higher = topspin dives harder / backspin floats higher (and, with its extra drag, lands SHORTER). Accel = this × speed per spin.', step: 0.05, min: 0, max: 3 },
+  { key: 'spinLandingBite', label: 'Spin Landing Bite', description: '0-1 — how much backspin kills (checks up) / topspin boosts forward roll on the landing bounce. 1 = backspin fully stops forward roll.', step: 0.05, min: 0, max: 1 },
+]
+
+const WIND_FIELDS: FieldSpec[] = [
+  { key: 'airDrag', label: 'Air Drag', description: '1/s — air-drag coefficient. Wind pushes the ball via drag toward the moving air; also the reason backspin (more airtime) drifts more than topspin. 0 = no drag/wind.', step: 0.01, min: 0, max: 1 },
+  { key: 'windMphScale', label: 'Wind mph→Speed', description: 'px/s of air velocity per 1 mph of wind. mph is just a display label; this sets how hard a given mph actually pushes.', step: 1, min: 0, max: 100 },
+  { key: 'windOverrideOn', label: 'Wind Override On', description: '0 or 1 — when 1, every hole uses the fixed Wind Override value below instead of a random per-hole wind (for testing a known wind).', step: 1, min: 0, max: 1 },
+  { key: 'windOverrideMph', label: 'Wind Override mph', description: 'Forced wind in mph (+right / -left) when Wind Override On is 1.', step: 1, min: -20, max: 20 },
+]
+
 const DISTANCE_FIELDS: FieldSpec[] = [
   { key: 'driverDistance', label: 'Driver Distance', description: 'px/s launch speed at 100% power — how hard the driver hits', step: 10, min: 0, max: 4000 },
   { key: 'wedgeDistance', label: 'Pitching Wedge Distance', description: 'px/s launch speed at 100% power — how hard the pitching wedge hits', step: 10, min: 0, max: 4000 },
   { key: 'putterDistance', label: 'Putter Distance', description: 'px/s launch speed at 100% power — how hard the putter hits', step: 5, min: 0, max: 2000 },
 ]
 
-const ALL_FIELDS = [...SERVER_FIELDS, ...BUNKER_FIELDS, ...PENALTY_FIELDS, ...DISTANCE_FIELDS]
+const ALL_FIELDS = [...SERVER_FIELDS, ...BUNKER_FIELDS, ...PENALTY_FIELDS, ...SPIN_FIELDS, ...WIND_FIELDS, ...DISTANCE_FIELDS]
 const CLIENT_KEYS = new Set<keyof KenValues>(['driverDistance', 'wedgeDistance', 'putterDistance'])
 
 function toServerTunables(v: KenValues): PhysicsTunables {
@@ -74,6 +86,12 @@ function toServerTunables(v: KenValues): PhysicsTunables {
     driverPenalty: v.driverPenalty,
     wedgePenalty: v.wedgePenalty,
     putterPenalty: v.putterPenalty,
+    airDrag: v.airDrag,
+    windMphScale: v.windMphScale,
+    spinMagnus: v.spinMagnus,
+    spinLandingBite: v.spinLandingBite,
+    windOverrideOn: v.windOverrideOn,
+    windOverrideMph: v.windOverrideMph,
   }
 }
 
@@ -154,6 +172,8 @@ export function createKenScreen(handlers: KenScreenHandlers): Screen {
     fieldsHost.appendChild(section('Ball Physics', SERVER_FIELDS))
     fieldsHost.appendChild(section('Bunker', BUNKER_FIELDS))
     fieldsHost.appendChild(section('Bunker Shot Penalties', PENALTY_FIELDS))
+    fieldsHost.appendChild(section('Spin', SPIN_FIELDS))
+    fieldsHost.appendChild(section('Wind', WIND_FIELDS))
     fieldsHost.appendChild(section('Club Distance', DISTANCE_FIELDS))
     syncJsonBox()
   }

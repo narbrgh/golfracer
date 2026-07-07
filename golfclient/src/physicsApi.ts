@@ -20,6 +20,12 @@ export interface PhysicsTunables {
   driverPenalty: number
   wedgePenalty: number
   putterPenalty: number
+  airDrag: number
+  windMphScale: number
+  spinMagnus: number
+  spinLandingBite: number
+  windOverrideOn: number
+  windOverrideMph: number
 }
 
 export interface PhysicsConfig {

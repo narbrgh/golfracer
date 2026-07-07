@@ -6,7 +6,7 @@ import type { Hole, BuiltSegment, SplineCoeff } from '../terrain'
 import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs } from '../terrain'
 import { colorHex } from './roomLobby'
 import { GameCamera, mountGameChrome } from '../gameCamera'
-import { SwingEngine, formatDistance } from '../swing'
+import { SwingEngine, formatDistance, airStep, WIND_MPH_SCALE } from '../swing'
 
 // The rendered canvas grows to fill the window but never shrinks below this — the
 // old fixed size, which reads well as a floor.
@@ -22,7 +22,7 @@ const PRED_MAX_MS = 500
 const SHOT_DELAY_MS = 2500 // matches server shotDelayTicks; water penalty is 2×
 
 export interface MatchHandlers {
-  onShoot: (vx: number, vy: number, club: string) => void
+  onShoot: (vx: number, vy: number, club: string, spin: string) => void
   onReturn: () => void
   onLeave: () => void
 }
@@ -70,8 +70,15 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   // distance, is what matters).
   let aiming = false, aimEngaged = false
   let aimStartSx = 0, aimStartSy = 0, aimCurSx = 0, aimCurSy = 0
-  const AIM_DRAG_COLOR = 'rgba(120,200,255,0.9)'
+  const AIM_DRAG_COLOR = 'rgba(150,215,255,1)'
   const AIM_DEADZONE_R = BALL_R * 4
+  // While actively changing the angle, the aim guides pulse between a bright and
+  // a near-white cyan on a slow (~1.6s) sine so they read as "live".
+  const AIM_PULSE_MS = 1600
+  const aimPulseColor = (nowMs: number): string => {
+    const t = (Math.sin((nowMs / AIM_PULSE_MS) * Math.PI * 2) + 1) / 2 // 0..1
+    return `rgb(${Math.round(150 + t * 75)},${Math.round(215 + t * 30)},255)`
+  }
 
   let clockBaseMs = 0
   let clockAt = 0
@@ -79,6 +86,8 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
 
   let predActive = false
   let predX = 0, predY = 0, predVX = 0, predVY = 0, predStart = 0
+  let predSpin = 0 // -1/0/+1, captured at fire so prediction matches the shot's spin
+  let windMph = 0  // current hole's wind (mph, +right), from match:state/match:hole
   let lastFrameMs = 0
   let myWasMoving = false // rest-edge tracking for the shot auto-zoom end
 
@@ -164,8 +173,9 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     const pos = myBallPos()
     if (!mb || !pos) return
     const { vx, vy } = swing.getLaunchVelocity(res.powerPct)
-    handlers.onShoot(vx, vy, swing.club)
+    handlers.onShoot(vx, vy, swing.club, swing.spin)
     predX = pos.x; predY = pos.y; predVX = vx; predVY = vy; predStart = performance.now()
+    predSpin = swing.spin === 'back' ? -1 : swing.spin === 'top' ? 1 : 0
     predActive = true
     // Auto-zoom out to capture the trajectory; eases back in when the ball rests.
     cam.startShot(vx, vy, GRAVITY)
@@ -302,24 +312,30 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     // otherwise. Computed here so the minimap can reuse the same world points.
     const pos = myBallPos()
     const parabolaPts = pos && canPreviewShot()
-      ? swing.computeParabolaWorld(pos.x, pos.y, h.worldW, h.worldH)
+      ? swing.computeParabolaWorld(pos.x, pos.y, h.worldW, h.worldH, (x) => tY(x) - BALL_R)
       : null
-    const parabolaColor = aiming && aimEngaged ? AIM_DRAG_COLOR : 'rgba(255,255,255,0.85)'
+    // While actively changing the angle, the aim guides glow with a slow pulse;
+    // otherwise they use the steady bright blue.
+    const engaged = aiming && aimEngaged
+    const aimColor = engaged ? aimPulseColor(performance.now()) : AIM_DRAG_COLOR
+
+    const parabolaColor = engaged ? aimColor : 'rgba(255,255,255,0.85)'
     if (parabolaPts) swing.drawParabolaWorld(ctx, parabolaPts, cam.zoom, parabolaColor)
 
     ctx.restore()
 
     // Central aim zone — the hashed blue circle where a drag starts an aim
-    // (drags outside it scroll the view). Shown whenever aiming is available.
-    if (canShoot()) swing.drawAimZone(ctx, cam.cw, cam.ch, aiming && aimEngaged)
+    // (drags outside it scroll the view). Shown whenever aiming is available,
+    // highlighted (and pulsing) while actively aiming.
+    if (canShoot()) swing.drawAimZone(ctx, cam.cw, cam.ch, engaged, engaged ? aimColor : undefined)
 
     // Aim-drag visualization (screen space): dead-zone circle at the origin —
     // red while inside it (cancelable), light blue once dragged past — plus a
     // dashed line to the cursor.
     if (aiming) {
-      ctx.strokeStyle = aimEngaged ? AIM_DRAG_COLOR : 'rgba(255,60,60,0.85)'; ctx.lineWidth = 2
+      ctx.strokeStyle = aimEngaged ? aimColor : 'rgba(255,60,60,0.85)'; ctx.lineWidth = 2
       ctx.beginPath(); ctx.arc(aimStartSx, aimStartSy, AIM_DEADZONE_R, 0, Math.PI * 2); ctx.stroke()
-      ctx.strokeStyle = AIM_DRAG_COLOR; ctx.lineWidth = 2; ctx.setLineDash([3, 3])
+      ctx.strokeStyle = aimColor; ctx.lineWidth = 2; ctx.setLineDash([3, 3])
       ctx.beginPath(); ctx.moveTo(aimStartSx, aimStartSy); ctx.lineTo(aimCurSx, aimCurSy); ctx.stroke()
       ctx.setLineDash([])
     }
@@ -401,6 +417,14 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     // not while it's still flying over the sand (matches canPreviewShot gating).
     const bpos = myBallPos()
     swing.inBunker = !!bpos && canPreviewShot() && xInBunker(bpos.x)
+    swing.freeLook = cam.mode === 'free'
+    swing.windVel = windMph * WIND_MPH_SCALE
+    // Keep the cup/ball anchors current so putter selection auto-aims (item 2),
+    // and re-aim the putter each time the ball settles (a putt past the cup flips
+    // its aim back toward the hole for the next stroke).
+    if (hole) swing.holeX = hole.holeX
+    if (bpos) swing.ballX = bpos.x
+    swing.setReady(canPreviewShot())
     swing.update(now)
 
     if (state) {
@@ -412,7 +436,9 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     }
 
     if (predActive) {
-      predVY += GRAVITY * dt
+      // Mirror the server's airborne physics (gravity + wind drag + spin Magnus)
+      // so the local prediction tracks the authoritative ball.
+      ;({ vx: predVX, vy: predVY } = airStep(predVX, predVY, dt, windMph * WIND_MPH_SCALE, predSpin))
       predX += predVX * dt
       predY += predVY * dt
       if (myId != null) render.set(myId, { x: predX, y: predY })
@@ -446,6 +472,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     if (state.phase === 'playing') {
       const ms = clockBaseMs + (performance.now() - clockAt)
       chrome.setHud(`Hole ${state.holeIndex + 1}/${state.holeCount}    ⏱ ${(ms / 1000).toFixed(1)}s`)
+      chrome.setWind(windMph)
     } else {
       chrome.setHud(null)
     }
@@ -472,9 +499,9 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     if (cam.onKeyDown(e)) { e.preventDefault(); chrome.sync(); return }
     // Swing shortcuts (mirror single-player): 1/2/3 club, 4/5/6 spin, Space = Hit!
     if (e.key === ' ') { e.preventDefault(); fireHit(); return }
-    if (e.key === '1') { swing.club = 'driver'; return }
-    if (e.key === '2') { swing.club = 'wedge'; return }
-    if (e.key === '3') { swing.club = 'putter'; return }
+    if (e.key === '1') { swing.setClub('driver'); return }
+    if (e.key === '2') { swing.setClub('wedge'); return }
+    if (e.key === '3') { swing.setClub('putter'); return }
     if (e.key === '4') { swing.spin = 'back'; return }
     if (e.key === '5') { swing.spin = 'none'; return }
     if (e.key === '6') { swing.spin = 'top'; return }
@@ -494,7 +521,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
           { label: 'Leave Game', onClick: () => handlers.onLeave() },
         ],
         onHit: () => fireHit(),
-        onClub: (c) => { swing.club = c as typeof swing.club },
+        onClub: (c) => { swing.setClub(c as typeof swing.club) },
         onSpin: (s) => { swing.spin = s as typeof swing.spin },
       })
       canvas = chrome.canvas
@@ -531,7 +558,12 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
           // free-look/aim branches so the controls work in either camera mode.
           const hud = swing.hitTestHud(p.x, p.y, cam.cw, cam.ch, chrome.insets)
           if (hud) {
-            if (hud === 'hit') fireHit()
+            if (hud === 'hit') {
+              // In free-look the meter can't start — a Hit! click exits free-look
+              // so the next click starts the swing (mirrors the mobile control).
+              if (cam.mode === 'free') { cam.exitFreeLook(); chrome.sync() }
+              else fireHit()
+            }
             else swing.handleHudClick(hud)
             return
           }
@@ -620,6 +652,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     setMyId(id) { myId = id },
     setHole(m) {
       hole = m.hole
+      windMph = m.wind ?? 0
       render.clear()
       rebuildCaches()
       myWasMoving = false; cam.endShot()
@@ -630,6 +663,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     },
     setState(m) {
       state = m
+      windMph = m.wind ?? windMph
       stateAt = performance.now()
       if (m.phase === 'playing') { clockBaseMs = m.holeMs; clockAt = stateAt }
       else predActive = false
