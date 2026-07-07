@@ -63,6 +63,7 @@
 /* Mobile wind indicator: bottom-left corner of the canvas (desktop hides it). */
 .gc-wind-mobile { display: none; }
 .gc-wrap.gc-portrait .gc-wind-mobile {
+  display: block;
   position: absolute;
   left: calc(10px + env(safe-area-inset-left, 0px));
   bottom: calc(14px + env(safe-area-inset-bottom, 0px));
@@ -295,6 +296,11 @@
   border-color: #fff;
   background: var(--sea-3);
 }
+/* Locked while the swing meter is running — club/spin can't change mid-swing. */
+.gc-ctl-btn.locked {
+  opacity: 0.4;
+  pointer-events: none;
+}
 .gc-ctl-bunker {
   min-width: 44px;
   text-align: center;
@@ -331,25 +337,30 @@
   background: rgba(128, 128, 128, 0.28);
   overflow: visible;
 }
-/* tick marks at 0/50/100 */
-.gc-ctl-meter::before,
-.gc-ctl-meter::after {
-  content: "";
+/* Tick marks: minor every 10% of power, long (emphasized) at the 0 origin and
+   50/100 power. Positions set from JS (track-fraction geometry, incl. the
+   left-of-0 underhang) — mirrors the desktop canvas meter. */
+.gc-ctl-meter-tick {
   position: absolute;
-  top: 3px; bottom: 3px;
-  width: 2px;
-  background: rgba(255, 255, 255, 0.55);
+  top: 6px; bottom: 6px;
+  width: 1px;
+  margin-left: -0.5px;
+  background: rgba(255, 255, 255, 0.45);
+  pointer-events: none;
 }
-.gc-ctl-meter::before { left: 50%; }
-.gc-ctl-meter::after { right: 3px; }
-/* Green accuracy buffer band — left edge of the meter, shown during the
-   accuracy sweep. Sits below ticks and ball (they're later in the DOM). */
+.gc-ctl-meter-tick.long {
+  top: 2px; bottom: 2px;
+  width: 2px;
+  margin-left: -1px;
+  background: rgba(255, 255, 255, 0.8);
+}
+/* Green accuracy buffer band — symmetric around the 0 origin, shown during the
+   accuracy sweep. left/width set from JS (track-fraction geometry). */
 .gc-ctl-meter-green {
   position: absolute;
-  top: 0; bottom: 0; left: 0;
-  width: 10%;
+  top: 0; bottom: 0;
+  left: 0; width: 0;
   background: rgba(120, 220, 120, 0.45);
-  border-radius: 13px 0 0 13px;
   display: none;
 }
 .gc-ctl-meter-green.show { display: block; }
@@ -365,19 +376,19 @@
   transform: translate(-50%, -50%);
   z-index: 1;
 }
-/* Power / accuracy % readout, floated just above the meter track. */
-.gc-ctl-meter-readout {
+/* % readouts just above the meter: accuracy on the left, power on the right. */
+.gc-ctl-meter-acc,
+.gc-ctl-meter-pow {
   position: absolute;
-  left: 0; right: 0;
   top: -16px;
-  text-align: center;
   font: 700 12px/1 ui-monospace, monospace;
-  color: #fff;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
   pointer-events: none;
   white-space: nowrap;
 }
-.gc-ctl-meter-readout.duff { color: #ff6b6b; }
+.gc-ctl-meter-acc { left: 0; color: #7ddc7d; }
+.gc-ctl-meter-acc.duff { color: #ff6b6b; }
+.gc-ctl-meter-pow { right: 0; color: #fff; }
 
 /* ---- Rotate-to-portrait prompt (coarse pointer + landscape) ---- */
 .gc-rotate {

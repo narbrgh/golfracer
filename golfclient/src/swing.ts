@@ -157,20 +157,43 @@ interface HudLayout {
 function clamp(v: number, lo: number, hi: number): number { return Math.max(lo, Math.min(hi, v)) }
 
 const SWING_RISE_MS = 750, SWING_FALL_MS = 750
-// The 'acc-*' phases are the accuracy sweep after power is set: same 750ms
-// legs, but they oscillate 0<->100 indefinitely (never auto-cancel) until the
-// 3rd press. The accuracy origin is the LEFT (0%) end.
-type MeterPhase = 'idle' | 'rising' | 'falling' | 'acc-rising' | 'acc-falling'
+// The 'acc-*' phases are the accuracy sweep after power is set: the ball keeps
+// oscillating with the SAME direction/position it had at the 2nd press (no
+// forced reversal), sweeping between the far-left underhang (-UNDERHANG_PCT) and
+// 100 until the 3rd press. The accuracy origin (dead-on target) is the 0 line.
+// 'frozen' holds the meter-ball where the firing press landed while the shot is
+// in flight — it stays there (not re-zeroed) until the ball rests (setReady's
+// rising edge), so the player can see exactly where they stopped it.
+type MeterPhase = 'idle' | 'rising' | 'falling' | 'acc-rising' | 'acc-falling' | 'frozen'
 
-// Accuracy tuning. The green buffer band is the left [0, GREEN_HALF]% of the
-// meter; stopping the ball inside it is a valid (non-duff) shot. Dead-on origin
-// (0%) is a perfect shot; the green edge maps to GREEN_EDGE_ACCURACY.
-const GREEN_HALF = 10               // green band spans meter 0..10%
-const GREEN_EDGE_ACCURACY = 60      // accuracy% at the green edge (== duff threshold)
-const ACC_MAX_ANGLE_DEG = 4         // max random angle nudge (deg) at the green edge
-const ACC_SPIN_FRACTION = 0.125     // spin nudge is this fraction of the angle nudge
-const DUFF_POWER = 15               // duffed shots fire at this fixed power%
-const DUFF_MIN_ANGLE_DEG = 5, DUFF_MAX_ANGLE_DEG = 15  // duff launch angle range (up)
+// Accuracy tuning. The meter extends UNDERHANG_PCT to the LEFT of the 0 origin
+// so the accuracy sweep has room to miss left of the line. Accuracy is measured
+// as distance (either side) from the 0 origin: dead-on (0) = 100%; the green
+// band spans ±GREEN_HALF (edges = GREEN_EDGE_ACCURACY); outside green ramps down
+// to a duff. Reaching the far-left end auto-fires at 0% (see update()).
+const UNDERHANG_PCT = 10             // meter extends this far left of 0 (in 0-100 units)
+
+/**
+ * Tick-mark positions for the swing meter, as fractions (0-1) of the FULL
+ * extended track (underhang + main). One tick every 10% of power from 0..100,
+ * plus the far-left underhang end. `long` marks the emphasized ticks (the 0
+ * origin and 50/100 power). Mirrors the canvas HUD ticks so the DOM meter
+ * (portrait mobile) matches desktop. Positions are constant, so callers can
+ * build the DOM once.
+ */
+export function meterTickFracs(): { frac: number; long: boolean }[] {
+  const span = UNDERHANG_PCT + 100
+  const toFrac = (pos: number) => (pos + UNDERHANG_PCT) / span
+  const ticks: { frac: number; long: boolean }[] = [{ frac: 0, long: false }] // underhang end
+  for (let p = 0; p <= 100; p += 10) ticks.push({ frac: toFrac(p), long: p === 0 || p === 50 || p === 100 })
+  return ticks
+}
+const GREEN_HALF = 8                 // green band spans -8..+8 around the 0 origin
+const GREEN_EDGE_ACCURACY = 60       // accuracy% at the green edge (== duff threshold)
+const ACC_MAX_ANGLE_DEG = 4          // max random angle nudge (deg) at the green edge
+const ACC_SPIN_FRACTION = 0.125      // spin nudge is this fraction of the angle nudge
+const DUFF_POWER_FRACTION = 0.20     // duffed shots keep this fraction of the captured power
+const DUFF_ANGLE_DEG = 15            // duff launch angle above horizontal (up-left or up-right)
 
 export interface SwingConfig { ballColorHex?: string }
 
@@ -191,14 +214,23 @@ export class SwingEngine {
   spin: Spin = 'none'
   // Launch direction, radians, standard atan2 convention in a y-down (screen/world)
   // coordinate system: 0 = +x (right), positive = downward, negative = upward.
-  // Default: 45° up-and-to-the-right.
+  // Default: 45° up-and-to-the-right. This is always the CURRENT club's aim.
   aimAngle: number = -Math.PI / 4
+  // The putter aims horizontally and independently of the driver/wedge, so its
+  // angle is stashed separately: switching to the putter and back must not reset
+  // the driver/wedge aim. nonPutterAimAngle holds the driver/wedge aim while the
+  // putter is selected; setClub swaps the right one into aimAngle on each change.
+  private nonPutterAimAngle: number = -Math.PI / 4
 
-  // Swing-meter state. meterPct is the ball icon's current position (0-100),
-  // recomputed each update() from meterPhase/meterPhaseStartMs.
+  // Swing-meter state. meterPct is the ball icon's current position. During the
+  // power sweep it is 0-100; during the accuracy sweep it can dip to
+  // -UNDERHANG_PCT (left of the 0 origin). Recomputed each update().
   private meterPhase: MeterPhase = 'idle'
   private meterPhaseStartMs = 0
   meterPct = 0
+  // Set by update() when the accuracy ball runs all the way to the far-left end
+  // without a 3rd press — the caller polls takeAutoFire() to fire a 0% duff.
+  private autoFire = false
   // Power captured on the 2nd press, carried into the accuracy sweep so the 3rd
   // press can combine power + accuracy into the final shot.
   private capturedPower = 0
@@ -251,7 +283,15 @@ export class SwingEngine {
   // putt that rolls PAST the cup flips the aim back toward it for the next stroke
   // instead of leaving it pointed the way the last putt travelled.
   setReady(ready: boolean): void {
-    if (ready && !this.wasReady) this.aimPutterAtHole()
+    if (ready && !this.wasReady) {
+      this.aimPutterAtHole()
+      // Ball just came to rest (red ready ring appears): release the frozen
+      // meter-ball back to 0 and clear the % readouts for the next swing.
+      if (this.meterPhase === 'frozen') {
+        this.meterPhase = 'idle'; this.meterPct = 0
+        this.lastPowerPct = null; this.lastAccuracyPct = null
+      }
+    }
     this.wasReady = ready
   }
 
@@ -261,7 +301,9 @@ export class SwingEngine {
   resetForHole(holeX: number, ballX: number): void {
     this.club = 'driver'
     this.spin = 'none'
-    this.aimAngle = holeX >= ballX ? -Math.PI / 4 : (-3 * Math.PI) / 4
+    this.aimAngle = this.nonPutterAimAngle = holeX >= ballX ? -Math.PI / 4 : (-3 * Math.PI) / 4
+    this.meterPhase = 'idle'; this.meterPct = 0
+    this.lastPowerPct = null; this.lastAccuracyPct = null
   }
 
   // Selects a club. When switching TO the putter, auto-aims it toward the hole
@@ -269,10 +311,30 @@ export class SwingEngine {
   // side the cup is on, using the holeX/ballX the screen keeps updated. Other
   // clubs keep their existing aimAngle untouched. All club-selection paths
   // (keyboard, DOM buttons, on-canvas HUD taps) go through here.
+  // Locked once the swing meter is running: you can't change club mid-swing.
   setClub(club: Club): void {
+    if (this.meterPhase !== 'idle') return
     const switchingToPutter = club === 'putter' && this.club !== 'putter'
-    this.club = club
-    if (switchingToPutter) this.aimPutterAtHole()
+    const switchingFromPutter = club !== 'putter' && this.club === 'putter'
+    if (switchingToPutter) {
+      // Stash the driver/wedge aim, then point the putter at the hole.
+      this.nonPutterAimAngle = this.aimAngle
+      this.club = club
+      this.aimPutterAtHole()
+    } else if (switchingFromPutter) {
+      // Restore the driver/wedge aim we had before switching to the putter.
+      this.club = club
+      this.aimAngle = this.nonPutterAimAngle
+    } else {
+      this.club = club
+    }
+  }
+
+  // Spin selection — locked once the swing meter is running, like setClub. All
+  // spin-selection paths (keyboard, DOM buttons, HUD taps) go through here.
+  setSpin(spin: Spin): void {
+    if (this.meterPhase !== 'idle') return
+    this.spin = spin
   }
 
   private layout(cw: number, ch: number, insets: SafeInsets = ZERO_INSETS): HudLayout {
@@ -306,15 +368,19 @@ export class SwingEngine {
     // but kept clear of the bottom-right button column (🔍/☰) so the meter's
     // right end doesn't slide under those buttons.
     const btnGutter = 72
+    // The meter's 0-origin sits at meterX; the accuracy underhang extends
+    // UNDERHANG_PCT% of the track further LEFT of it, so reserve that width in
+    // the gap after the Hit! button (else the underhang would slide under Hit!).
+    const underhangW = (UNDERHANG_PCT / 100) * METER_W
     let rx = cx + centerGapHalf
-    const rightEnd = rx + HIT_W + HIT_METER_GAP + METER_W
+    const rightEnd = rx + HIT_W + HIT_METER_GAP + underhangW + METER_W
     // If it would run under the corner buttons, slide the whole right cluster
     // left just enough to clear them.
     const overshoot = Math.max(0, rightEnd - (cw - btnGutter))
     rx -= overshoot
     const hitX = rx
     const hitY = rowY
-    rx += HIT_W + HIT_METER_GAP
+    rx += HIT_W + HIT_METER_GAP + underhangW
     const meterX = rx, meterW = METER_W
     const meterY = rowY + (HIT_H - METER_H) / 2
 
@@ -342,7 +408,7 @@ export class SwingEngine {
   /** Applies a club/spin HUD click. Hit! goes through pressHit() instead. */
   handleHudClick(region: HudRegion) {
     if (region.startsWith('club:')) this.setClub(region.slice(5) as Club)
-    else if (region.startsWith('spin:')) this.spin = region.slice(5) as Spin
+    else if (region.startsWith('spin:')) this.setSpin(region.slice(5) as Spin)
   }
 
   /**
@@ -353,6 +419,9 @@ export class SwingEngine {
    */
   update(nowMs: number) {
     if (this.meterPhase === 'idle') { this.meterPct = 0; return }
+    // Frozen: the shot has fired and the meter-ball holds its firing position
+    // until the ball rests (setReady clears it). Don't advance or move it.
+    if (this.meterPhase === 'frozen') return
     const elapsed = nowMs - this.meterPhaseStartMs
     if (this.meterPhase === 'rising') {
       if (elapsed >= SWING_RISE_MS) { this.meterPhase = 'falling'; this.meterPhaseStartMs = nowMs; this.meterPct = 100 }
@@ -361,20 +430,25 @@ export class SwingEngine {
       if (elapsed >= SWING_FALL_MS) { this.meterPhase = 'idle'; this.meterPct = 0 }
       else this.meterPct = 100 - (elapsed / SWING_FALL_MS) * 100
     } else if (this.meterPhase === 'acc-falling') {
-      // Sweeping toward the 0% origin; at 0, bounce back up. Never auto-cancels.
-      if (elapsed >= SWING_FALL_MS) { this.meterPhase = 'acc-rising'; this.meterPhaseStartMs = nowMs; this.meterPct = 0 }
-      else this.meterPct = 100 - (elapsed / SWING_FALL_MS) * 100
-    } else { // acc-rising
-      if (elapsed >= SWING_RISE_MS) { this.meterPhase = 'acc-falling'; this.meterPhaseStartMs = nowMs; this.meterPct = 100 }
-      else this.meterPct = (elapsed / SWING_RISE_MS) * 100
+      // Sweeping down toward -UNDERHANG_PCT (past the 0 origin). Same 750ms leg
+      // speed as power (100 units in SWING_FALL_MS). When the ball runs all the
+      // way to the far-left end, the 3rd hit is auto-registered there (0% duff).
+      const pct = 100 - (elapsed / SWING_FALL_MS) * 100
+      if (pct <= -UNDERHANG_PCT) { this.meterPct = -UNDERHANG_PCT; this.autoFire = true }
+      else this.meterPct = pct
+    } else { // acc-rising: sweeping back up from -UNDERHANG_PCT toward 100
+      const pct = -UNDERHANG_PCT + (elapsed / SWING_RISE_MS) * 100
+      if (pct >= 100) { this.meterPhase = 'acc-falling'; this.meterPhaseStartMs = nowMs; this.meterPct = 100 }
+      else this.meterPct = pct
     }
   }
 
   /**
-   * Handles a Hit! press — the 3-press swing machine.
+   * Handles a Hit! press — the swing machine.
    *   Press 1 (idle):        start the power sweep, return null.
-   *   Press 2 (rising/fall):  capture power, reverse into the accuracy sweep
-   *                           toward the 0% origin, return { fired:false }.
+   *   Press 2 (rising/fall):  capture power. Driver/wedge start the accuracy
+   *                           sweep and return { fired:false }; the PUTTER (no
+   *                           spin/angle) skips accuracy and fires immediately.
    *   Press 3 (acc-*):        capture accuracy from distance-to-origin, resolve
    *                           duff / angle nudge, reset to idle, return
    *                           { fired:true, ... } for the caller to launch.
@@ -387,42 +461,84 @@ export class SwingEngine {
     }
 
     if (this.meterPhase === 'rising' || this.meterPhase === 'falling') {
-      // Press 2: lock power, start the accuracy sweep. Seed acc-falling so its
-      // position begins exactly at the current meterPct and heads toward 0.
       this.capturedPower = this.meterPct
       this.lastPowerPct = Math.round(this.capturedPower)
-      this.meterPhase = 'acc-falling'
-      // acc-falling maps elapsed->(100 - elapsed/FALL*100); solve for the start
-      // offset that yields the current pct so there's no visual jump.
-      this.meterPhaseStartMs = nowMs - (1 - this.meterPct / 100) * SWING_FALL_MS
+
+      // The putter uses neither spin nor angle, so the accuracy hit is pointless:
+      // press 2 fires straight away (2-press swing), always dead-on, never a duff.
+      if (this.club === 'putter') {
+        this.lastAccuracyPct = null
+        // Freeze at the power position; re-zeroes when the ball rests (setReady).
+        this.meterPhase = 'frozen'  // meterPct stays where the 2nd hit landed
+        return { fired: true, powerPct: this.capturedPower, accuracyPct: 100, accuracyOffsetRad: 0, duff: false }
+      }
+
+      // Press 2: lock power, then keep the ball moving in its CURRENT direction
+      // (no forced reversal). 'rising' continues up to 100 first (acc-rising),
+      // 'falling' continues down toward the origin (acc-falling). Seed the phase
+      // clock so the position/direction is continuous — no visual jump.
+      if (this.meterPhase === 'rising') {
+        this.meterPhase = 'acc-rising'
+        // acc-rising maps elapsed -> -UNDERHANG_PCT + elapsed/RISE*100.
+        this.meterPhaseStartMs = nowMs - ((this.meterPct + UNDERHANG_PCT) / 100) * SWING_RISE_MS
+      } else {
+        this.meterPhase = 'acc-falling'
+        // acc-falling maps elapsed -> 100 - elapsed/FALL*100.
+        this.meterPhaseStartMs = nowMs - ((100 - this.meterPct) / 100) * SWING_FALL_MS
+      }
       return { fired: false, powerPct: this.capturedPower }
     }
 
-    // Press 3: accuracy from distance to the left (0%) origin.
-    const dist = this.meterPct
+    // Press 3 (acc-rising/acc-falling): resolve accuracy from the ball's distance
+    // to the 0 origin. In 'frozen' (shot in flight) a press does nothing.
+    if (this.meterPhase === 'frozen') return null
+    return this.resolveAccuracy(this.meterPct)
+  }
+
+  /**
+   * Resolves an accuracy sweep into a fired HitResult from the ball's signed
+   * position (0 = dead-on origin, negative = left underhang). Shared by the 3rd
+   * press and the far-left auto-fire. Accuracy is distance from 0 on either
+   * side: 100% dead-on, GREEN_EDGE_ACCURACY at ±GREEN_HALF, ramping to a duff
+   * beyond the green band.
+   */
+  private resolveAccuracy(pos: number): Extract<HitResult, { fired: true }> {
+    const dist = Math.abs(pos)
     const powerPct = this.capturedPower
     let accuracyPct: number
     if (dist <= GREEN_HALF) {
       accuracyPct = 100 - (dist / GREEN_HALF) * (100 - GREEN_EDGE_ACCURACY)
     } else {
-      // Falls off below the green edge the further past the band you stop.
-      accuracyPct = Math.max(0, GREEN_EDGE_ACCURACY - (dist - GREEN_HALF) * 2)
+      // Ramp below the green edge; reaches 0 by the far-left underhang end.
+      accuracyPct = Math.max(0, GREEN_EDGE_ACCURACY - (dist - GREEN_HALF) * 30)
     }
     this.lastAccuracyPct = Math.round(accuracyPct)
-    this.meterPhase = 'idle'; this.meterPct = 0
+    // Freeze the meter-ball where the 3rd hit landed (don't re-zero yet) — it
+    // holds this spot while the shot flies, until the ball rests (setReady).
+    this.meterPhase = 'frozen'; this.meterPct = pos; this.autoFire = false
 
     const duff = accuracyPct < GREEN_EDGE_ACCURACY
     let accuracyOffsetRad = 0
     if (!duff) {
       // accFrac: 1 dead-on -> 0 at the green edge. Angle nudge grows as accFrac
       // shrinks; spin adds a tiny extra random angle term. Random sign each shot.
-      const accFrac = dist <= 0 ? 1 : Math.max(0, 1 - dist / GREEN_HALF)
+      const accFrac = Math.max(0, 1 - dist / GREEN_HALF)
       const angleDeg = ACC_MAX_ANGLE_DEG * (1 - accFrac)
       const spinDeg = angleDeg * ACC_SPIN_FRACTION
       const nudge = (angleDeg + (Math.random() * 2 - 1) * spinDeg) * (Math.random() < 0.5 ? -1 : 1)
       accuracyOffsetRad = (nudge * Math.PI) / 180
     }
     return { fired: true, powerPct, accuracyPct, accuracyOffsetRad, duff }
+  }
+
+  /**
+   * If the accuracy ball ran to the far-left end without a 3rd press, returns
+   * the auto-fired (0% duff) shot once; otherwise null. Callers poll this each
+   * frame (after update()) alongside their own press handling.
+   */
+  takeAutoFire(): Extract<HitResult, { fired: true }> | null {
+    if (!this.autoFire) return null
+    return this.resolveAccuracy(this.meterPct) // meterPct is pinned at -UNDERHANG_PCT
   }
 
   // Sets aimAngle from a slingshot drag: the launch direction is AWAY from the
@@ -439,7 +555,9 @@ export class SwingEngine {
       return
     }
 
-    this.aimAngle = Math.atan2(rawDy, rawDx)
+    // Driver/wedge: keep nonPutterAimAngle in sync so a later putter round-trip
+    // restores this fresh aim, not a stale one from before the drag.
+    this.aimAngle = this.nonPutterAimAngle = Math.atan2(rawDy, rawDx)
   }
 
   // 100%-power flight preview at aimAngle. Euler-integrated with the same air
@@ -557,14 +675,16 @@ export class SwingEngine {
     const L = this.layout(cw, ch, insets)
     ctx.save()
 
+    // Club/spin can't change mid-swing — grey them out once the meter is running.
+    const locked = this.meterPhase !== 'idle'
     const drawIcon = (x: number, y: number, label: string, selected: boolean) => {
       ctx.beginPath()
       ctx.roundRect(x, y, ICON, ICON, 6)
-      ctx.fillStyle = 'rgba(128,128,128,0.5)'; ctx.fill()
+      ctx.fillStyle = locked ? 'rgba(128,128,128,0.25)' : 'rgba(128,128,128,0.5)'; ctx.fill()
       ctx.strokeStyle = selected ? '#fff' : '#000'
       ctx.lineWidth = selected ? 2 : 1.5
       ctx.stroke()
-      ctx.fillStyle = '#fff'; ctx.font = 'bold 12px monospace'
+      ctx.fillStyle = locked ? 'rgba(255,255,255,0.4)' : '#fff'; ctx.font = 'bold 12px monospace'
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
       ctx.fillText(label, x + ICON / 2, y + ICON / 2 + 1)
     }
@@ -596,51 +716,58 @@ export class SwingEngine {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
     ctx.fillText('Hit!', L.hitX + HIT_W / 2, L.hitY + HIT_H / 2 + 1)
 
-    // Power meter track — narrow, fixed width.
+    // A signed meter position (-UNDERHANG_PCT .. 100) -> screen x. 0 = origin at
+    // L.meterX; the underhang extends left of it.
+    const underhangW = (UNDERHANG_PCT / 100) * L.meterW
+    const posToX = (pos: number) => L.meterX + (pos / 100) * L.meterW
+    const trackLeft = L.meterX - underhangW
+    const trackW = underhangW + L.meterW
+
+    // Power meter track — spans the underhang (left of origin) + main 0..100.
     ctx.beginPath()
-    ctx.roundRect(L.meterX, L.meterY, L.meterW, METER_H, METER_H / 2)
+    ctx.roundRect(trackLeft, L.meterY, trackW, METER_H, METER_H / 2)
     ctx.fillStyle = 'rgba(128,128,128,0.5)'; ctx.fill()
     ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke()
 
-    // Green accuracy buffer band — the left [0, GREEN_HALF]% of the meter, shown
-    // only during the accuracy sweep. Ticks and the ball marker draw on top.
+    // Green accuracy buffer band — symmetric ±GREEN_HALF around the 0 origin,
+    // shown only during the accuracy sweep. Ticks and the ball draw on top.
     const accPhase = this.meterPhase === 'acc-rising' || this.meterPhase === 'acc-falling'
     if (accPhase) {
       ctx.save()
       ctx.beginPath()
-      ctx.roundRect(L.meterX, L.meterY, L.meterW, METER_H, METER_H / 2)
+      ctx.roundRect(trackLeft, L.meterY, trackW, METER_H, METER_H / 2)
       ctx.clip()
       ctx.fillStyle = 'rgba(120,220,120,0.45)'
-      ctx.fillRect(L.meterX, L.meterY, (GREEN_HALF / 100) * L.meterW, METER_H)
+      const gx = posToX(-GREEN_HALF)
+      ctx.fillRect(gx, L.meterY, posToX(GREEN_HALF) - gx, METER_H)
       ctx.restore()
     }
 
-    // Power / accuracy % readout, above the meter so it clears the bottom tick
-    // labels. Power in white once captured; accuracy green (≥ threshold) or red
-    // (duff) once captured.
+    // % readouts above the meter (clearing the bottom tick labels): ACCURACY on
+    // the LEFT (green ≥ threshold, red duff), POWER on the RIGHT (white).
     const readoutY = L.meterY - 12
     ctx.font = 'bold 13px monospace'
     ctx.textBaseline = 'alphabetic'
-    if (this.lastPowerPct !== null) {
-      ctx.textAlign = 'left'
-      ctx.fillStyle = 'rgba(0,0,0,0.55)'
-      ctx.fillText(`P ${this.lastPowerPct}%`, L.meterX + 1, readoutY + 1)
-      ctx.fillStyle = '#fff'
-      ctx.fillText(`P ${this.lastPowerPct}%`, L.meterX, readoutY)
-    }
     if (this.lastAccuracyPct !== null) {
       const good = this.lastAccuracyPct >= GREEN_EDGE_ACCURACY
+      ctx.textAlign = 'left'
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'
+      ctx.fillText(`A ${this.lastAccuracyPct}%`, trackLeft + 1, readoutY + 1)
+      ctx.fillStyle = good ? '#7ddc7d' : '#ff6b6b'
+      ctx.fillText(`A ${this.lastAccuracyPct}%`, trackLeft, readoutY)
+    }
+    if (this.lastPowerPct !== null) {
       ctx.textAlign = 'right'
       ctx.fillStyle = 'rgba(0,0,0,0.55)'
-      ctx.fillText(`A ${this.lastAccuracyPct}%`, L.meterX + L.meterW + 1, readoutY + 1)
-      ctx.fillStyle = good ? '#7ddc7d' : '#ff6b6b'
-      ctx.fillText(`A ${this.lastAccuracyPct}%`, L.meterX + L.meterW, readoutY)
+      ctx.fillText(`P ${this.lastPowerPct}%`, L.meterX + L.meterW + 1, readoutY + 1)
+      ctx.fillStyle = '#fff'
+      ctx.fillText(`P ${this.lastPowerPct}%`, L.meterX + L.meterW, readoutY)
     }
 
     ctx.font = '10px monospace'; ctx.fillStyle = '#ccc'
     ctx.textAlign = 'center'; ctx.textBaseline = 'top'
     for (let p = 0; p <= 100; p += 10) {
-      const tx = L.meterX + (p / 100) * L.meterW
+      const tx = posToX(p)
       const long = p === 0 || p === 50 || p === 100
       ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = long ? 2 : 1
       ctx.beginPath()
@@ -650,8 +777,9 @@ export class SwingEngine {
       if (long) ctx.fillText(String(p), tx, L.meterY + METER_H + 8)
     }
 
-    // Ball tracks the live meter position (0 at rest, sweeps while swinging).
-    const ballX = L.meterX + (this.meterPct / 100) * L.meterW
+    // Ball tracks the live signed meter position (0 at rest, can dip into the
+    // underhang during the accuracy sweep).
+    const ballX = posToX(this.meterPct)
     ctx.beginPath()
     ctx.arc(ballX, L.meterY + METER_H / 2, BALL_R, 0, Math.PI * 2)
     ctx.fillStyle = this.ballColorHex; ctx.fill()
@@ -667,8 +795,21 @@ export class SwingEngine {
   /** True during the accuracy sweep (after power is set) — DOM shows the green band. */
   isAccuracyPhase(): boolean { return this.meterPhase === 'acc-rising' || this.meterPhase === 'acc-falling' }
 
-  /** Green buffer band width as a fraction (0-1) of the meter, from the left origin. */
-  greenBandFraction(): number { return GREEN_HALF / 100 }
+  /**
+   * Meter geometry for the DOM mirror, all as fractions (0-1) of the FULL
+   * extended track (underhang + main). Lets the DOM place the ball, the 0
+   * origin, and the symmetric green band without knowing the constants.
+   */
+  meterGeom(): { ballFrac: number; originFrac: number; greenLeftFrac: number; greenRightFrac: number } {
+    const span = UNDERHANG_PCT + 100 // total track width in pct units
+    const toFrac = (pos: number) => (pos + UNDERHANG_PCT) / span
+    return {
+      ballFrac: toFrac(this.meterPct),
+      originFrac: toFrac(0),
+      greenLeftFrac: toFrac(-GREEN_HALF),
+      greenRightFrac: toFrac(GREEN_HALF),
+    }
+  }
 
   /** The selected club's bunker-penalty as a percentage (e.g. 25 / 70 / 50). */
   clubBunkerPct(): number { return CLUB_BUNKER_PENALTY[this.club] * 100 }
@@ -695,12 +836,13 @@ export class SwingEngine {
    */
   resolveLaunch(res: Extract<HitResult, { fired: true }>): { vx: number; vy: number } {
     if (res.duff) {
-      const speed = CLUB_MAX_SPEED[this.club] * DUFF_POWER / 100
+      // Duff: 20% of the power the player actually set, launched 15° above the
+      // horizontal to a random side (screen/world y-down: negative vy = up).
+      const powerPct = clamp(res.powerPct, 0, 100) * DUFF_POWER_FRACTION
+      const speed = CLUB_MAX_SPEED[this.club] * powerPct / 100
         * (this.inBunker ? CLUB_BUNKER_PENALTY[this.club] : 1)
-      // Small upward launch (screen/world y-down: negative vy = up) to a random side.
-      const deg = DUFF_MIN_ANGLE_DEG + Math.random() * (DUFF_MAX_ANGLE_DEG - DUFF_MIN_ANGLE_DEG)
       const side = Math.random() < 0.5 ? -1 : 1
-      const a = (deg * Math.PI) / 180
+      const a = (DUFF_ANGLE_DEG * Math.PI) / 180
       return { vx: side * Math.cos(a) * speed, vy: -Math.sin(a) * speed }
     }
     return this.getLaunchVelocity(res.powerPct, res.accuracyOffsetRad)

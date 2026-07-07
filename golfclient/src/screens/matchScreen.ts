@@ -165,14 +165,10 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   // Fire the current swing: capture power from the Hit! meter (or start the
   // sweep on the first press), convert to a launch velocity, send it, and kick
   // off the local shot prediction. Shared by the Hit! HUD button and Space.
-  function fireHit() {
-    if (!canShoot()) return
-    const res = swing.pressHit(performance.now())
-    // Press 1 -> null, press 2 -> power captured (keep swinging), press 3 -> launch.
-    if (!res || !res.fired) return
-    const mb = myBall()
+  // Sends a resolved (3rd-press or auto) shot: launch velocity + prediction.
+  function launchFromResult(res: Extract<ReturnType<typeof swing.pressHit>, { fired: true }>) {
     const pos = myBallPos()
-    if (!mb || !pos) return
+    if (!myBall() || !pos) return
     const { vx, vy } = swing.resolveLaunch(res)
     // A duff fires with no spin (see resolveLaunch); send 'none' so the server's
     // ball flight and our local prediction both drop the spin.
@@ -183,6 +179,13 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     predActive = true
     // Auto-zoom out to capture the trajectory; eases back in when the ball rests.
     cam.startShot(vx, vy, GRAVITY)
+  }
+
+  function fireHit() {
+    if (!canShoot()) return
+    const res = swing.pressHit(performance.now())
+    // Press 1 -> null, press 2 -> power captured (keep swinging), press 3 -> launch.
+    if (res && res.fired) launchFromResult(res)
   }
 
   function drawShotRing(x: number, y: number, b: MatchBall, iz: number) {
@@ -393,11 +396,13 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         chrome.miniCtx.clearRect(0, 0, b.w, b.h)
         cam.drawMinimapInBox(chrome.miniCtx, b, (mwx, mwy) => drawMiniContent(b, mwx, mwy))
       }
+      const mgeom = swing.meterGeom()
       chrome.setControls({
         club: swing.club, spin: swing.spin,
-        meterPct: swing.meterPct, swinging: swing.isSwinging(),
+        swinging: swing.isSwinging(),
         bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
-        accPhase: swing.isAccuracyPhase(), greenFraction: swing.greenBandFraction(),
+        ballFrac: mgeom.ballFrac, greenLeftFrac: mgeom.greenLeftFrac, greenRightFrac: mgeom.greenRightFrac,
+        accPhase: swing.isAccuracyPhase(),
         powerPct: swing.lastPowerPct, accuracyPct: swing.lastAccuracyPct,
       })
     } else {
@@ -432,6 +437,11 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     if (bpos) swing.ballX = bpos.x
     swing.setReady(canPreviewShot())
     swing.update(now)
+    // Accuracy ball ran to the far-left end untouched -> auto-fire a 0% duff.
+    if (canShoot()) {
+      const auto = swing.takeAutoFire()
+      if (auto) launchFromResult(auto)
+    }
 
     if (state) {
       for (const b of state.balls) {
@@ -508,9 +518,9 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     if (e.key === '1') { swing.setClub('driver'); return }
     if (e.key === '2') { swing.setClub('wedge'); return }
     if (e.key === '3') { swing.setClub('putter'); return }
-    if (e.key === '4') { swing.spin = 'back'; return }
-    if (e.key === '5') { swing.spin = 'none'; return }
-    if (e.key === '6') { swing.spin = 'top'; return }
+    if (e.key === '4') { swing.setSpin('back'); return }
+    if (e.key === '5') { swing.setSpin('none'); return }
+    if (e.key === '6') { swing.setSpin('top'); return }
   }
   const onKeyUp = (e: KeyboardEvent) => { cam.onKeyUp(e) }
 
@@ -528,7 +538,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         ],
         onHit: () => fireHit(),
         onClub: (c) => { swing.setClub(c as typeof swing.club) },
-        onSpin: (s) => { swing.spin = s as typeof swing.spin },
+        onSpin: (s) => { swing.setSpin(s as typeof swing.spin) },
       })
       canvas = chrome.canvas
       ctx = chrome.ctx

@@ -7,6 +7,8 @@
 // mountGameChrome() builds the actual DOM (wrap/canvas/hud/free-look-arrows/
 // hamburger menu) both screens share, so the two GUIs can't drift apart again.
 
+import { meterTickFracs } from './swing'
+
 export type CamMode = 'follow' | 'free'
 
 export interface GameCameraConfig {
@@ -349,12 +351,16 @@ export interface SafeInsets { top: number; right: number; bottom: number; left: 
 export interface ControlsState {
   club: string
   spin: string
-  meterPct: number
   swinging: boolean
   bunkerPct: number | null
+  // Meter geometry as fractions (0-1) of the full extended track (underhang +
+  // main), from swing.meterGeom(): ball position, the 0 origin, and the green
+  // band edges. Lets the DOM place everything without knowing the constants.
+  ballFrac: number
+  greenLeftFrac: number
+  greenRightFrac: number
   // Accuracy sweep (3rd-press): show the green buffer band + power/accuracy %.
   accPhase: boolean
-  greenFraction: number          // green band width as a fraction (0-1) of the meter
   powerPct: number | null        // captured power %, null before the 2nd press
   accuracyPct: number | null     // captured accuracy %, null before the 3rd press
 }
@@ -465,7 +471,8 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
         <div class="gc-ctl-meter" data-meter>
           <div class="gc-ctl-meter-green" data-meter-green></div>
           <div class="gc-ctl-meter-ball" data-meter-ball></div>
-          <div class="gc-ctl-meter-readout" data-meter-readout></div>
+          <div class="gc-ctl-meter-acc" data-meter-acc></div>
+          <div class="gc-ctl-meter-pow" data-meter-pow></div>
         </div>
       </div>
     </div>
@@ -481,7 +488,18 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   const bunkerEl = root.querySelector<HTMLElement>('[data-bunker]')!
   const meterBallEl = root.querySelector<HTMLElement>('[data-meter-ball]')!
   const meterGreenEl = root.querySelector<HTMLElement>('[data-meter-green]')!
-  const meterReadoutEl = root.querySelector<HTMLElement>('[data-meter-readout]')!
+  const meterAccEl = root.querySelector<HTMLElement>('[data-meter-acc]')!
+  const meterPowEl = root.querySelector<HTMLElement>('[data-meter-pow]')!
+  const meterEl = root.querySelector<HTMLElement>('[data-meter]')!
+  // Tick marks (built once — positions are constant). Long ticks at the 0
+  // origin and 50/100 power; minor ticks every 10% between. Mirrors the desktop
+  // canvas HUD meter so the two layouts match.
+  for (const t of meterTickFracs()) {
+    const tick = document.createElement('div')
+    tick.className = t.long ? 'gc-ctl-meter-tick long' : 'gc-ctl-meter-tick'
+    tick.style.left = `${t.frac * 100}%`
+    meterEl.appendChild(tick)
+  }
   const hitBtnEl = root.querySelector<HTMLButtonElement>('[data-hit]')!
   const hudEl = root.querySelector<HTMLElement>('[data-hud]')!
   const hudLeftEl = root.querySelector<HTMLElement>('[data-hud-left]')!
@@ -781,21 +799,26 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
     },
     setControls(s: ControlsState) {
       if (!portrait) return
-      for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-club]')))
+      // Club/spin can't change mid-swing — grey the buttons while swinging.
+      for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-club]'))) {
         btn.classList.toggle('active', btn.dataset.club === s.club)
-      for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-spin]')))
+        btn.classList.toggle('locked', s.swinging)
+      }
+      for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-spin]'))) {
         btn.classList.toggle('active', btn.dataset.spin === s.spin)
+        btn.classList.toggle('locked', s.swinging)
+      }
       hitBtnEl.classList.toggle('active', s.swinging)
-      meterBallEl.style.left = `${s.meterPct}%`
-      // Green accuracy band on the left, shown only during the accuracy sweep.
-      meterGreenEl.style.width = `${s.greenFraction * 100}%`
+      meterBallEl.style.left = `${s.ballFrac * 100}%`
+      // Green accuracy band, symmetric around the origin, shown only during the
+      // accuracy sweep. Position/width from the track-fraction geometry.
+      meterGreenEl.style.left = `${s.greenLeftFrac * 100}%`
+      meterGreenEl.style.width = `${(s.greenRightFrac - s.greenLeftFrac) * 100}%`
       meterGreenEl.classList.toggle('show', s.accPhase)
-      // Power / accuracy % readout.
-      const parts: string[] = []
-      if (s.powerPct !== null) parts.push(`P ${s.powerPct}%`)
-      if (s.accuracyPct !== null) parts.push(`A ${s.accuracyPct}%`)
-      meterReadoutEl.textContent = parts.join('  ')
-      meterReadoutEl.classList.toggle('duff', s.accuracyPct !== null && s.accuracyPct < 60)
+      // Readouts: accuracy on the left, power on the right.
+      meterAccEl.textContent = s.accuracyPct !== null ? `A ${s.accuracyPct}%` : ''
+      meterAccEl.classList.toggle('duff', s.accuracyPct !== null && s.accuracyPct < 60)
+      meterPowEl.textContent = s.powerPct !== null ? `P ${s.powerPct}%` : ''
       if (s.bunkerPct === null) { bunkerEl.textContent = ''; bunkerEl.classList.remove('show') }
       else { bunkerEl.textContent = `${s.bunkerPct}%`; bunkerEl.classList.add('show') }
     },

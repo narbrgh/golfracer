@@ -183,7 +183,7 @@ const chrome = mountGameChrome(host, cam, {
   // shortcuts / on-canvas HUD taps.
   onHit: () => pressHitShortcut(),
   onClub: (c) => { swing.setClub(c as typeof swing.club) },
-  onSpin: (s) => { swing.spin = s as typeof swing.spin },
+  onSpin: (s) => { swing.setSpin(s as typeof swing.spin) },
 })
 const canvas = chrome.canvas
 const ctx = chrome.ctx
@@ -628,11 +628,13 @@ function draw() {
       mc.clearRect(0, 0, b.w, b.h)
       cam.drawMinimapInBox(mc, b, (mwx, mwy) => drawMinimapContent(mc, b, mwx, mwy, parabolaPts, parabolaColor))
     }
+    const mg = swing.meterGeom()
     chrome.setControls({
       club: swing.club, spin: swing.spin,
-      meterPct: swing.meterPct, swinging: swing.isSwinging(),
+      swinging: swing.isSwinging(),
       bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
-      accPhase: swing.isAccuracyPhase(), greenFraction: swing.greenBandFraction(),
+      ballFrac: mg.ballFrac, greenLeftFrac: mg.greenLeftFrac, greenRightFrac: mg.greenRightFrac,
+      accPhase: swing.isAccuracyPhase(),
       powerPct: swing.lastPowerPct, accuracyPct: swing.lastAccuracyPct,
     })
   } else {
@@ -666,6 +668,11 @@ function tick() {
   swing.ballX = physBallX
   swing.setReady(canPreviewShot())
   swing.update(Date.now())
+  // If the accuracy ball ran to the far-left end untouched, auto-fire a 0% duff.
+  if (canShootNow()) {
+    const auto = swing.takeAutoFire()
+    if (auto) launchFromResult(auto)
+  }
   ballX += (physBallX - ballX) * BALL_LERP
   ballY += (physBallY - ballY) * BALL_LERP
   if (!trulyResting && restingDebounceStart !== null && Date.now() - restingDebounceStart >= REST_DEBOUNCE_MS) {
@@ -906,16 +913,18 @@ const editor = initEditor({
 //   Space         — in Free-look, return to Hit mode; in Hit mode, press Hit!
 //   1 / 2 / 3     — driver / pitching wedge / putter
 //   4 / 5 / 6     — backspin / no spin / topspin
+// Fires a resolved (3rd-press or auto) shot: build the launch velocity and send.
+function launchFromResult(res: Extract<ReturnType<typeof swing.pressHit>, { fired: true }>) {
+  const { vx, vy } = swing.resolveLaunch(res)
+  // A duff fires with no spin (see resolveLaunch); send 'none' to match.
+  launch(vx, vy, res.duff ? 'none' : swing.spin)
+}
 function pressHitShortcut() {
   if (!canShootNow()) return
   const res = swing.pressHit(Date.now())
   // Press 1 -> null, press 2 -> { fired:false } (power captured, keep swinging),
   // press 3 -> { fired:true } (launch). Only fire on the 3rd press.
-  if (res && res.fired) {
-    const { vx, vy } = swing.resolveLaunch(res)
-    // A duff fires with no spin (see resolveLaunch); send 'none' to match.
-    launch(vx, vy, res.duff ? 'none' : swing.spin)
-  }
+  if (res && res.fired) launchFromResult(res)
 }
 function onKeyDown(e: KeyboardEvent) {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
@@ -925,9 +934,9 @@ function onKeyDown(e: KeyboardEvent) {
   if (e.key === '1') { swing.setClub('driver'); return }
   if (e.key === '2') { swing.setClub('wedge'); return }
   if (e.key === '3') { swing.setClub('putter'); return }
-  if (e.key === '4') { swing.spin = 'back'; return }
-  if (e.key === '5') { swing.spin = 'none'; return }
-  if (e.key === '6') { swing.spin = 'top'; return }
+  if (e.key === '4') { swing.setSpin('back'); return }
+  if (e.key === '5') { swing.setSpin('none'); return }
+  if (e.key === '6') { swing.setSpin('top'); return }
   if (e.key === 'r' || e.key === 'R') ws.send(JSON.stringify({ type: 'reset', tee: 'back' }))
   else if (e.key === 't' || e.key === 'T') ws.send(JSON.stringify({ type: 'reset', tee: 'forward' }))
   else if (e.key === 'e' || e.key === 'E') {
