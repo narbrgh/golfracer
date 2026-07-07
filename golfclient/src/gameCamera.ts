@@ -352,6 +352,11 @@ export interface ControlsState {
   meterPct: number
   swinging: boolean
   bunkerPct: number | null
+  // Accuracy sweep (3rd-press): show the green buffer band + power/accuracy %.
+  accPhase: boolean
+  greenFraction: number          // green band width as a fraction (0-1) of the meter
+  powerPct: number | null        // captured power %, null before the 2nd press
+  accuracyPct: number | null     // captured accuracy %, null before the 3rd press
 }
 
 export interface GameChromeHandle {
@@ -458,7 +463,9 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
       <div class="gc-ctl-row">
         <button class="gc-ctl-hit" data-hit>Hit!</button>
         <div class="gc-ctl-meter" data-meter>
+          <div class="gc-ctl-meter-green" data-meter-green></div>
           <div class="gc-ctl-meter-ball" data-meter-ball></div>
+          <div class="gc-ctl-meter-readout" data-meter-readout></div>
         </div>
       </div>
     </div>
@@ -473,6 +480,8 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   const controlsEl = root.querySelector<HTMLElement>('[data-controls]')!
   const bunkerEl = root.querySelector<HTMLElement>('[data-bunker]')!
   const meterBallEl = root.querySelector<HTMLElement>('[data-meter-ball]')!
+  const meterGreenEl = root.querySelector<HTMLElement>('[data-meter-green]')!
+  const meterReadoutEl = root.querySelector<HTMLElement>('[data-meter-readout]')!
   const hitBtnEl = root.querySelector<HTMLButtonElement>('[data-hit]')!
   const hudEl = root.querySelector<HTMLElement>('[data-hud]')!
   const hudLeftEl = root.querySelector<HTMLElement>('[data-hud-left]')!
@@ -778,6 +787,15 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
         btn.classList.toggle('active', btn.dataset.spin === s.spin)
       hitBtnEl.classList.toggle('active', s.swinging)
       meterBallEl.style.left = `${s.meterPct}%`
+      // Green accuracy band on the left, shown only during the accuracy sweep.
+      meterGreenEl.style.width = `${s.greenFraction * 100}%`
+      meterGreenEl.classList.toggle('show', s.accPhase)
+      // Power / accuracy % readout.
+      const parts: string[] = []
+      if (s.powerPct !== null) parts.push(`P ${s.powerPct}%`)
+      if (s.accuracyPct !== null) parts.push(`A ${s.accuracyPct}%`)
+      meterReadoutEl.textContent = parts.join('  ')
+      meterReadoutEl.classList.toggle('duff', s.accuracyPct !== null && s.accuracyPct < 60)
       if (s.bunkerPct === null) { bunkerEl.textContent = ''; bunkerEl.classList.remove('show') }
       else { bunkerEl.textContent = `${s.bunkerPct}%`; bunkerEl.classList.add('show') }
     },

@@ -301,10 +301,11 @@ func main() {
 			if len(plat.Points) < 3 {
 				continue
 			}
+			fric := plat.PlatformFriction()
 			pts := terrain.EnsureCW(plat.Points)
 			for i := 0; i < len(pts); i++ {
 				a, b := pts[i], pts[(i+1)%len(pts)]
-				edges = append(edges, physics.NewEdge(a.X, a.Y, b.X, b.Y))
+				edges = append(edges, physics.NewFrictionEdge(a.X, a.Y, b.X, b.Y, fric))
 			}
 		}
 

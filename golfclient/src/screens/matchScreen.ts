@@ -168,14 +168,18 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   function fireHit() {
     if (!canShoot()) return
     const res = swing.pressHit(performance.now())
-    if (!res) return
+    // Press 1 -> null, press 2 -> power captured (keep swinging), press 3 -> launch.
+    if (!res || !res.fired) return
     const mb = myBall()
     const pos = myBallPos()
     if (!mb || !pos) return
-    const { vx, vy } = swing.getLaunchVelocity(res.powerPct)
-    handlers.onShoot(vx, vy, swing.club, swing.spin)
+    const { vx, vy } = swing.resolveLaunch(res)
+    // A duff fires with no spin (see resolveLaunch); send 'none' so the server's
+    // ball flight and our local prediction both drop the spin.
+    const shotSpin = res.duff ? 'none' : swing.spin
+    handlers.onShoot(vx, vy, swing.club, shotSpin)
     predX = pos.x; predY = pos.y; predVX = vx; predVY = vy; predStart = performance.now()
-    predSpin = swing.spin === 'back' ? -1 : swing.spin === 'top' ? 1 : 0
+    predSpin = shotSpin === 'back' ? -1 : shotSpin === 'top' ? 1 : 0
     predActive = true
     // Auto-zoom out to capture the trajectory; eases back in when the ball rests.
     cam.startShot(vx, vy, GRAVITY)
@@ -393,6 +397,8 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         club: swing.club, spin: swing.spin,
         meterPct: swing.meterPct, swinging: swing.isSwinging(),
         bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
+        accPhase: swing.isAccuracyPhase(), greenFraction: swing.greenBandFraction(),
+        powerPct: swing.lastPowerPct, accuracyPct: swing.lastAccuracyPct,
       })
     } else {
       const miniBox = cam.miniBox()

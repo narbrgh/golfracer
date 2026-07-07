@@ -6,11 +6,15 @@
 // networking or the server; callers (main.ts, eventually matchScreen.ts)
 // own the canvas/camera/websocket and wire this in.
 //
-// Swing mechanic (2-press, for now): first Hit! press starts the meter
-// (ball icon sweeps 0->100 over risingMs, then 100->0 over fallingMs,
-// auto-cancelling with no penalty if it runs all the way back to 0
-// untouched). A second press mid-sweep captures the current % as power and
-// reports it back to the caller — accuracy (a 3rd press) is deferred.
+// Swing mechanic (3-press): first Hit! press starts the meter (ball icon
+// sweeps 0->100 over risingMs, then 100->0 over fallingMs, auto-cancelling
+// with no penalty if it runs all the way back to 0 untouched). A second
+// press mid-sweep captures the current % as POWER and reverses the ball into
+// an accuracy sweep that oscillates toward the left (0%) origin. A third
+// press captures ACCURACY from how close the ball is to that origin: dead-on
+// = a perfect shot; within the light-green buffer band = a small random angle
+// nudge; outside green (accuracy < 60%) = a "duff" (weak, near-flat shot to a
+// random side). The caller only launches on the 3rd press.
 //
 // NOTE (anti-cheat, flagged for later): today the caller fires the shot by
 // sending this module's computed (vx, vy) straight to the server — a
@@ -153,11 +157,34 @@ interface HudLayout {
 function clamp(v: number, lo: number, hi: number): number { return Math.max(lo, Math.min(hi, v)) }
 
 const SWING_RISE_MS = 750, SWING_FALL_MS = 750
-type MeterPhase = 'idle' | 'rising' | 'falling'
+// The 'acc-*' phases are the accuracy sweep after power is set: same 750ms
+// legs, but they oscillate 0<->100 indefinitely (never auto-cancel) until the
+// 3rd press. The accuracy origin is the LEFT (0%) end.
+type MeterPhase = 'idle' | 'rising' | 'falling' | 'acc-rising' | 'acc-falling'
+
+// Accuracy tuning. The green buffer band is the left [0, GREEN_HALF]% of the
+// meter; stopping the ball inside it is a valid (non-duff) shot. Dead-on origin
+// (0%) is a perfect shot; the green edge maps to GREEN_EDGE_ACCURACY.
+const GREEN_HALF = 10               // green band spans meter 0..10%
+const GREEN_EDGE_ACCURACY = 60      // accuracy% at the green edge (== duff threshold)
+const ACC_MAX_ANGLE_DEG = 4         // max random angle nudge (deg) at the green edge
+const ACC_SPIN_FRACTION = 0.125     // spin nudge is this fraction of the angle nudge
+const DUFF_POWER = 15               // duffed shots fire at this fixed power%
+const DUFF_MIN_ANGLE_DEG = 5, DUFF_MAX_ANGLE_DEG = 15  // duff launch angle range (up)
 
 export interface SwingConfig { ballColorHex?: string }
 
-export interface HitResult { fired: true; powerPct: number }
+// A press either reports nothing (press 1), the captured power to display
+// (press 2, fired:false), or the final resolved shot (press 3, fired:true).
+export type HitResult =
+  | { fired: false; powerPct: number }
+  | {
+      fired: true
+      powerPct: number
+      accuracyPct: number
+      accuracyOffsetRad: number
+      duff: boolean
+    }
 
 export class SwingEngine {
   club: Club = 'driver'
@@ -172,6 +199,12 @@ export class SwingEngine {
   private meterPhase: MeterPhase = 'idle'
   private meterPhaseStartMs = 0
   meterPct = 0
+  // Power captured on the 2nd press, carried into the accuracy sweep so the 3rd
+  // press can combine power + accuracy into the final shot.
+  private capturedPower = 0
+  // Last power/accuracy % captured, for the HUD readouts. null = not shown.
+  lastPowerPct: number | null = null
+  lastAccuracyPct: number | null = null
 
   ballColorHex: string
 
@@ -324,25 +357,72 @@ export class SwingEngine {
     if (this.meterPhase === 'rising') {
       if (elapsed >= SWING_RISE_MS) { this.meterPhase = 'falling'; this.meterPhaseStartMs = nowMs; this.meterPct = 100 }
       else this.meterPct = (elapsed / SWING_RISE_MS) * 100
-    } else {
+    } else if (this.meterPhase === 'falling') {
       if (elapsed >= SWING_FALL_MS) { this.meterPhase = 'idle'; this.meterPct = 0 }
       else this.meterPct = 100 - (elapsed / SWING_FALL_MS) * 100
+    } else if (this.meterPhase === 'acc-falling') {
+      // Sweeping toward the 0% origin; at 0, bounce back up. Never auto-cancels.
+      if (elapsed >= SWING_FALL_MS) { this.meterPhase = 'acc-rising'; this.meterPhaseStartMs = nowMs; this.meterPct = 0 }
+      else this.meterPct = 100 - (elapsed / SWING_FALL_MS) * 100
+    } else { // acc-rising
+      if (elapsed >= SWING_RISE_MS) { this.meterPhase = 'acc-falling'; this.meterPhaseStartMs = nowMs; this.meterPct = 100 }
+      else this.meterPct = (elapsed / SWING_RISE_MS) * 100
     }
   }
 
   /**
-   * Handles a Hit! press. First press (from idle) starts the meter sweep and
-   * returns null. A second press, mid-sweep, captures the current % as
-   * power, resets to idle, and reports it back for the caller to launch.
+   * Handles a Hit! press — the 3-press swing machine.
+   *   Press 1 (idle):        start the power sweep, return null.
+   *   Press 2 (rising/fall):  capture power, reverse into the accuracy sweep
+   *                           toward the 0% origin, return { fired:false }.
+   *   Press 3 (acc-*):        capture accuracy from distance-to-origin, resolve
+   *                           duff / angle nudge, reset to idle, return
+   *                           { fired:true, ... } for the caller to launch.
    */
   pressHit(nowMs: number): HitResult | null {
     if (this.meterPhase === 'idle') {
       this.meterPhase = 'rising'; this.meterPhaseStartMs = nowMs; this.meterPct = 0
+      this.lastPowerPct = null; this.lastAccuracyPct = null
       return null
     }
-    const powerPct = this.meterPct
+
+    if (this.meterPhase === 'rising' || this.meterPhase === 'falling') {
+      // Press 2: lock power, start the accuracy sweep. Seed acc-falling so its
+      // position begins exactly at the current meterPct and heads toward 0.
+      this.capturedPower = this.meterPct
+      this.lastPowerPct = Math.round(this.capturedPower)
+      this.meterPhase = 'acc-falling'
+      // acc-falling maps elapsed->(100 - elapsed/FALL*100); solve for the start
+      // offset that yields the current pct so there's no visual jump.
+      this.meterPhaseStartMs = nowMs - (1 - this.meterPct / 100) * SWING_FALL_MS
+      return { fired: false, powerPct: this.capturedPower }
+    }
+
+    // Press 3: accuracy from distance to the left (0%) origin.
+    const dist = this.meterPct
+    const powerPct = this.capturedPower
+    let accuracyPct: number
+    if (dist <= GREEN_HALF) {
+      accuracyPct = 100 - (dist / GREEN_HALF) * (100 - GREEN_EDGE_ACCURACY)
+    } else {
+      // Falls off below the green edge the further past the band you stop.
+      accuracyPct = Math.max(0, GREEN_EDGE_ACCURACY - (dist - GREEN_HALF) * 2)
+    }
+    this.lastAccuracyPct = Math.round(accuracyPct)
     this.meterPhase = 'idle'; this.meterPct = 0
-    return { fired: true, powerPct }
+
+    const duff = accuracyPct < GREEN_EDGE_ACCURACY
+    let accuracyOffsetRad = 0
+    if (!duff) {
+      // accFrac: 1 dead-on -> 0 at the green edge. Angle nudge grows as accFrac
+      // shrinks; spin adds a tiny extra random angle term. Random sign each shot.
+      const accFrac = dist <= 0 ? 1 : Math.max(0, 1 - dist / GREEN_HALF)
+      const angleDeg = ACC_MAX_ANGLE_DEG * (1 - accFrac)
+      const spinDeg = angleDeg * ACC_SPIN_FRACTION
+      const nudge = (angleDeg + (Math.random() * 2 - 1) * spinDeg) * (Math.random() < 0.5 ? -1 : 1)
+      accuracyOffsetRad = (nudge * Math.PI) / 180
+    }
+    return { fired: true, powerPct, accuracyPct, accuracyOffsetRad, duff }
   }
 
   // Sets aimAngle from a slingshot drag: the launch direction is AWAY from the
@@ -522,6 +602,41 @@ export class SwingEngine {
     ctx.fillStyle = 'rgba(128,128,128,0.5)'; ctx.fill()
     ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke()
 
+    // Green accuracy buffer band — the left [0, GREEN_HALF]% of the meter, shown
+    // only during the accuracy sweep. Ticks and the ball marker draw on top.
+    const accPhase = this.meterPhase === 'acc-rising' || this.meterPhase === 'acc-falling'
+    if (accPhase) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.roundRect(L.meterX, L.meterY, L.meterW, METER_H, METER_H / 2)
+      ctx.clip()
+      ctx.fillStyle = 'rgba(120,220,120,0.45)'
+      ctx.fillRect(L.meterX, L.meterY, (GREEN_HALF / 100) * L.meterW, METER_H)
+      ctx.restore()
+    }
+
+    // Power / accuracy % readout, above the meter so it clears the bottom tick
+    // labels. Power in white once captured; accuracy green (≥ threshold) or red
+    // (duff) once captured.
+    const readoutY = L.meterY - 12
+    ctx.font = 'bold 13px monospace'
+    ctx.textBaseline = 'alphabetic'
+    if (this.lastPowerPct !== null) {
+      ctx.textAlign = 'left'
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'
+      ctx.fillText(`P ${this.lastPowerPct}%`, L.meterX + 1, readoutY + 1)
+      ctx.fillStyle = '#fff'
+      ctx.fillText(`P ${this.lastPowerPct}%`, L.meterX, readoutY)
+    }
+    if (this.lastAccuracyPct !== null) {
+      const good = this.lastAccuracyPct >= GREEN_EDGE_ACCURACY
+      ctx.textAlign = 'right'
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'
+      ctx.fillText(`A ${this.lastAccuracyPct}%`, L.meterX + L.meterW + 1, readoutY + 1)
+      ctx.fillStyle = good ? '#7ddc7d' : '#ff6b6b'
+      ctx.fillText(`A ${this.lastAccuracyPct}%`, L.meterX + L.meterW, readoutY)
+    }
+
     ctx.font = '10px monospace'; ctx.fillStyle = '#ccc'
     ctx.textAlign = 'center'; ctx.textBaseline = 'top'
     for (let p = 0; p <= 100; p += 10) {
@@ -549,12 +664,18 @@ export class SwingEngine {
   /** True while a swing meter is sweeping (used by DOM controls to highlight Hit!). */
   isSwinging(): boolean { return this.meterPhase !== 'idle' }
 
+  /** True during the accuracy sweep (after power is set) — DOM shows the green band. */
+  isAccuracyPhase(): boolean { return this.meterPhase === 'acc-rising' || this.meterPhase === 'acc-falling' }
+
+  /** Green buffer band width as a fraction (0-1) of the meter, from the left origin. */
+  greenBandFraction(): number { return GREEN_HALF / 100 }
+
   /** The selected club's bunker-penalty as a percentage (e.g. 25 / 70 / 50). */
   clubBunkerPct(): number { return CLUB_BUNKER_PENALTY[this.club] * 100 }
 
-  // Converts a captured power % (0-100, from pressHit's HitResult) into a
-  // launch velocity at the current club/aimAngle. accuracyOffsetRad is
-  // unused today (no 3rd press yet) — defaults to dead-on.
+  // Converts a captured power % (0-100) into a launch velocity at the current
+  // club/aimAngle. accuracyOffsetRad bends the launch angle (from the 3rd
+  // press); 0 = dead-on.
   getLaunchVelocity(powerPct: number, accuracyOffsetRad = 0): { vx: number; vy: number } {
     const angle = this.aimAngle + accuracyOffsetRad
     let speed = CLUB_MAX_SPEED[this.club] * clamp(powerPct, 0, 100) / 100
@@ -563,6 +684,26 @@ export class SwingEngine {
     // client can't dodge it — this is prediction fidelity, not the enforcement.
     if (this.inBunker) speed *= CLUB_BUNKER_PENALTY[this.club]
     return { vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed }
+  }
+
+  /**
+   * Resolves a fired (3rd-press) HitResult into the final launch velocity,
+   * owning the duff special-case. A duff ignores the captured power and aim:
+   * it fires weakly (DUFF_POWER) at a small random upward angle toward a random
+   * side, regardless of the selected club's direction. A clean shot just applies
+   * the accuracy angle offset to the normal power/aim launch.
+   */
+  resolveLaunch(res: Extract<HitResult, { fired: true }>): { vx: number; vy: number } {
+    if (res.duff) {
+      const speed = CLUB_MAX_SPEED[this.club] * DUFF_POWER / 100
+        * (this.inBunker ? CLUB_BUNKER_PENALTY[this.club] : 1)
+      // Small upward launch (screen/world y-down: negative vy = up) to a random side.
+      const deg = DUFF_MIN_ANGLE_DEG + Math.random() * (DUFF_MAX_ANGLE_DEG - DUFF_MIN_ANGLE_DEG)
+      const side = Math.random() < 0.5 ? -1 : 1
+      const a = (deg * Math.PI) / 180
+      return { vx: side * Math.cos(a) * speed, vy: -Math.sin(a) * speed }
+    }
+    return this.getLaunchVelocity(res.powerPct, res.accuracyOffsetRad)
   }
 }
 

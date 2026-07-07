@@ -321,8 +321,8 @@ function aimPulseColor(nowMs: number): string {
 
 const swing = new SwingEngine({ ballColorHex: '#fff' })
 
-function launch(vx: number, vy: number) {
-  ws.send(JSON.stringify({ type: 'shoot', vx, vy, club: swing.club, spin: swing.spin }))
+function launch(vx: number, vy: number, spin: string = swing.spin) {
+  ws.send(JSON.stringify({ type: 'shoot', vx, vy, club: swing.club, spin }))
   // Auto-zoom out to capture the trajectory from here; eases back in once the
   // ball settles (see the rest-detection in tick()). GRAVITY matches the server.
   cam.startShot(vx, vy, 1500)
@@ -632,6 +632,8 @@ function draw() {
       club: swing.club, spin: swing.spin,
       meterPct: swing.meterPct, swinging: swing.isSwinging(),
       bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
+      accPhase: swing.isAccuracyPhase(), greenFraction: swing.greenBandFraction(),
+      powerPct: swing.lastPowerPct, accuracyPct: swing.lastAccuracyPct,
     })
   } else {
     const miniBox = cam.miniBox()
@@ -907,9 +909,12 @@ const editor = initEditor({
 function pressHitShortcut() {
   if (!canShootNow()) return
   const res = swing.pressHit(Date.now())
-  if (res) {
-    const { vx, vy } = swing.getLaunchVelocity(res.powerPct)
-    launch(vx, vy)
+  // Press 1 -> null, press 2 -> { fired:false } (power captured, keep swinging),
+  // press 3 -> { fired:true } (launch). Only fire on the 3rd press.
+  if (res && res.fired) {
+    const { vx, vy } = swing.resolveLaunch(res)
+    // A duff fires with no spin (see resolveLaunch); send 'none' to match.
+    launch(vx, vy, res.duff ? 'none' : swing.spin)
   }
 }
 function onKeyDown(e: KeyboardEvent) {

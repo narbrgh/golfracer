@@ -186,6 +186,23 @@ type Platform struct {
 	ZOrder    string         `json:"zOrder"` // "front" | "back"
 	FillColor string         `json:"fillColor"`
 	EdgeColor string         `json:"edgeColor"`
+	// Rolling friction (px/s² kinetic deceleration) for a ball rolling on this
+	// platform's edges. nil → the DefaultPlatformFriction below. Per-platform so
+	// designers can make an icy ledge or a sticky green.
+	Friction *float64 `json:"friction,omitempty"`
+}
+
+// DefaultPlatformFriction is the rolling friction applied to platform edges when
+// a Platform doesn't specify its own. Higher than grass's global RollingFriction
+// (400) so balls settle on platforms rather than sliding off.
+const DefaultPlatformFriction = 800.0
+
+// PlatformFriction returns the platform's own friction, or the package default.
+func (p Platform) PlatformFriction() float64 {
+	if p.Friction != nil {
+		return *p.Friction
+	}
+	return DefaultPlatformFriction
 }
 
 // PolySignedArea returns the signed area of a polygon in screen/Y-down

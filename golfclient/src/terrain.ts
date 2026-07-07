@@ -152,7 +152,14 @@ export interface Platform {
   zOrder: 'front' | 'back'  // front = above terrain, back = behind terrain
   fillColor: string
   edgeColor: string
+  // Rolling friction (px/s²) for a ball on this platform. undefined → server
+  // default (DEFAULT_PLATFORM_FRICTION). Per-platform so a ledge can be icy/sticky.
+  friction?: number
 }
+
+// Mirrors golfserver terrain.DefaultPlatformFriction — the friction applied when
+// a platform doesn't set its own. Keep in sync with the server constant.
+export const DEFAULT_PLATFORM_FRICTION = 800
 
 // Signed area of a polygon in screen/Y-down coordinates.
 // Positive → clockwise (CW) on screen, which is what NewEdge expects for

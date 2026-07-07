@@ -329,7 +329,7 @@
   border-radius: 13px;
   border: 2px solid rgba(0, 0, 0, 0.55);
   background: rgba(128, 128, 128, 0.28);
-  overflow: hidden;
+  overflow: visible;
 }
 /* tick marks at 0/50/100 */
 .gc-ctl-meter::before,
@@ -342,6 +342,17 @@
 }
 .gc-ctl-meter::before { left: 50%; }
 .gc-ctl-meter::after { right: 3px; }
+/* Green accuracy buffer band — left edge of the meter, shown during the
+   accuracy sweep. Sits below ticks and ball (they're later in the DOM). */
+.gc-ctl-meter-green {
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 10%;
+  background: rgba(120, 220, 120, 0.45);
+  border-radius: 13px 0 0 13px;
+  display: none;
+}
+.gc-ctl-meter-green.show { display: block; }
 .gc-ctl-meter-ball {
   position: absolute;
   top: 50%;
@@ -352,7 +363,21 @@
   background: #fff;
   border: 1px solid #000;
   transform: translate(-50%, -50%);
+  z-index: 1;
 }
+/* Power / accuracy % readout, floated just above the meter track. */
+.gc-ctl-meter-readout {
+  position: absolute;
+  left: 0; right: 0;
+  top: -16px;
+  text-align: center;
+  font: 700 12px/1 ui-monospace, monospace;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.gc-ctl-meter-readout.duff { color: #ff6b6b; }
 
 /* ---- Rotate-to-portrait prompt (coarse pointer + landscape) ---- */
 .gc-rotate {

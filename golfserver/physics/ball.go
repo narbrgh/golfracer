@@ -179,6 +179,7 @@ type Edge struct {
 	Restitution    float64 // normal-speed retention on bounce
 	BounceFric     float64 // tangential-speed retention on bounce
 	Sand           bool    // true for bunker surfaces: rolling friction uses Current.BunkerFriction
+	Friction       float64 // per-edge rolling friction (px/s²); 0 → use the global default
 }
 
 // NewEdge builds an Edge from two endpoints with the default (terrain) material.
@@ -214,6 +215,15 @@ func NewEdgeMat(x0, y0, x1, y1, restitution, bounceFric float64) Edge {
 func NewSandEdge(x0, y0, x1, y1, restitution, bounceFric float64) Edge {
 	e := NewEdgeMat(x0, y0, x1, y1, restitution, bounceFric)
 	e.Sand = true
+	return e
+}
+
+// NewFrictionEdge builds a default-material Edge with an explicit per-edge
+// rolling friction (px/s²), used by platform edges so each platform can have its
+// own grip. A friction of 0 falls back to the global RollingFriction in Tick.
+func NewFrictionEdge(x0, y0, x1, y1, friction float64) Edge {
+	e := NewEdge(x0, y0, x1, y1)
+	e.Friction = friction
 	return e
 }
 
@@ -510,6 +520,8 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 		rollingFriction := Current.RollingFriction
 		if e.Sand {
 			rollingFriction = Current.BunkerFriction
+		} else if e.Friction > 0 {
+			rollingFriction = e.Friction // per-edge override (e.g. platform grip)
 		}
 		vtPrior := vt - slopeGravDt
 		decel := rollingFriction * dt

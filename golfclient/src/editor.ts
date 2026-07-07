@@ -1,5 +1,5 @@
 import type { Course, Hole, TerrainSegment, TerrainWave, CourseTheme, ControlPoint, Hazard, Platform, Pt, Bunker } from './terrain'
-import { buildSegments, terrainY, DEFAULT_HOLE, buildSpline, splineY, hexWithAlpha, waterPoolBounds, pointInPoly, SPLINE_BASE_REF, bunkerRimCoeffs } from './terrain'
+import { buildSegments, terrainY, DEFAULT_HOLE, buildSpline, splineY, hexWithAlpha, waterPoolBounds, pointInPoly, SPLINE_BASE_REF, bunkerRimCoeffs, DEFAULT_PLATFORM_FRICTION } from './terrain'
 import { listCourses, getCourse, saveCourse, newHole, newCourse } from './courseapi'
 import './editor.css'
 
@@ -1604,6 +1604,7 @@ export function initEditor(opts: {
         zOrder: src?.zOrder ?? 'front',
         fillColor: src?.fillColor ?? PLAT_FILL_DEFAULT,
         edgeColor: src?.edgeColor ?? PLAT_EDGE_DEFAULT,
+        friction: src?.friction,
       }
       hole.platforms.push(plat)
       selectPlatform(hole.platforms.length - 1)
@@ -1629,6 +1630,7 @@ export function initEditor(opts: {
         zOrder: plat.zOrder,
         fillColor: plat.fillColor,
         edgeColor: plat.edgeColor,
+        friction: plat.friction,
       }
       hole.platforms.splice(pi + 1, 0, copy)
       selectPlatform(pi + 1)
@@ -1655,6 +1657,11 @@ export function initEditor(opts: {
 
     el.appendChild(colorRow('Fill',   plat.fillColor || PLAT_FILL_DEFAULT, v => { plat.fillColor = v; emit() }))
     el.appendChild(colorRow('Edge',   plat.edgeColor || PLAT_EDGE_DEFAULT, v => { plat.edgeColor = v; emit() }))
+
+    // Rolling friction (px/s²). Lower = icy/slippery, higher = sticky. undefined
+    // means the shared default (DEFAULT_PLATFORM_FRICTION); the slider shows that.
+    el.appendChild(sliderRow('Friction', plat.friction ?? DEFAULT_PLATFORM_FRICTION,
+      0, 2000, 50, v => { plat.friction = v; emit() }))
 
     const ptCount = document.createElement('div')
     ptCount.style.cssText = 'font:11px monospace;color:#666;padding:2px 0 4px 0'
