@@ -168,7 +168,7 @@ export function initEditor(opts: {
 
   function initGameCamera() {
     const cw = canvasWrap.clientWidth || 800, ch = canvasWrap.clientHeight || 400
-    gvCamX = Math.max(0, hole.teeBackX - cw * 0.25 / gvZoom)
+    gvCamX = Math.max(0, hole.tees[0] - cw * 0.25 / gvZoom)
     gvCamY = Math.max(0, hole.baseGround - ch * 0.55 / gvZoom)
   }
 
@@ -861,7 +861,7 @@ export function initEditor(opts: {
 
     // tees
     ctx.fillStyle = 'rgba(255,255,255,0.85)'
-    for (const teeX of [hole.teeBackX, hole.teeForwardX])
+    for (const teeX of hole.tees)
       ctx.fillRect(tx(teeX) - 2, ty(ptY(teeX)) - 6 * s, 4, 6 * s)
 
     // hole flag
@@ -980,7 +980,7 @@ export function initEditor(opts: {
 
     // tees
     ctx.fillStyle = '#fff'
-    for (const tX of [hole.teeBackX, hole.teeForwardX])
+    for (const tX of hole.tees)
       ctx.fillRect(tX - 3, ptY(tX) - 10, 6, 10)
 
     // hole flag
@@ -1424,9 +1424,29 @@ export function initEditor(opts: {
 
   function buildHoleTeeSection() {
     const { sec, content } = mksec('Hole & Tees')
-    content.appendChild(sliderRow('Back tee X', hole.teeBackX,    0, hole.worldW, 25, v => { hole.teeBackX    = v; emit() }))
-    content.appendChild(sliderRow('Fwd tee X',  hole.teeForwardX, 0, hole.worldW, 25, v => { hole.teeForwardX = v; emit() }))
-    content.appendChild(sliderRow('Hole X',     hole.holeX,       0, hole.worldW, 25, v => { hole.holeX       = v; emit() }))
+    // One slider per tee (up to 4). Tee 1 is the "back" tee (standings leader);
+    // the match assigns tees to players in rank order.
+    hole.tees.forEach((_, i) => {
+      const row = document.createElement('div')
+      row.style.cssText = 'display:flex;align-items:center;gap:6px'
+      const label = hole.tees.length > 1 ? `Tee ${i + 1} X` : 'Tee X'
+      const slider = sliderRow(label, hole.tees[i], 0, hole.worldW, 25, v => { hole.tees[i] = v; emit() })
+      slider.style.flex = '1'
+      row.appendChild(slider)
+      if (hole.tees.length > 1) {
+        row.appendChild(mkBtn('×', () => { hole.tees.splice(i, 1); emit(); rebuild() }, 'del-btn'))
+      }
+      content.appendChild(row)
+    })
+    if (hole.tees.length < 4) {
+      content.appendChild(mkBtn('+ Add Tee', () => {
+        // New tee sits just right of the last, clamped to the world.
+        const last = hole.tees[hole.tees.length - 1] ?? 0
+        hole.tees.push(Math.min(last + 120, hole.worldW))
+        emit(); rebuild()
+      }, 'add-btn'))
+    }
+    content.appendChild(sliderRow('Hole X', hole.holeX, 0, hole.worldW, 25, v => { hole.holeX = v; emit() }))
     sidebar.appendChild(sec)
   }
 

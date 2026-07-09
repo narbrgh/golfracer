@@ -27,9 +27,10 @@ func TestLoadWrapsBareHole(t *testing.T) {
 	if c.Holes[0].WorldW != 4000 || c.Holes[0].HoleX != 3700 {
 		t.Errorf("bare hole fields not preserved: %+v", c.Holes[0])
 	}
-	// Missing per-hole fields hydrated to defaults (not left zero).
-	if c.Holes[0].WorldH == 0 || c.Holes[0].TeeBackX == 0 {
-		t.Errorf("defaults not hydrated: worldH=%v teeBackX=%v", c.Holes[0].WorldH, c.Holes[0].TeeBackX)
+	// Missing per-hole fields hydrated to defaults (not left zero); tees default
+	// to the multi-tee list (legacy TeeBackX/TeeForwardX fold into Tees).
+	if c.Holes[0].WorldH == 0 || len(c.Holes[0].Tees) == 0 {
+		t.Errorf("defaults not hydrated: worldH=%v tees=%v", c.Holes[0].WorldH, c.Holes[0].Tees)
 	}
 }
 

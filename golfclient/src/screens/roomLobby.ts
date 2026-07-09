@@ -20,6 +20,7 @@ export interface RoomLobbyHandlers {
   onSetName: (name: string) => void
   onSetColor: (color: string) => void
   onSetReady: (ready: boolean) => void
+  onSetSpectator: (spectator: boolean) => void
   onChat: (text: string) => void
   onSetCourse: (courseId: string) => void
   onSetVictory: (victory: string) => void
@@ -45,6 +46,7 @@ export function createRoomLobby(handlers: RoomLobbyHandlers): RoomLobbyScreen {
     colors: HTMLElement
     courses: HTMLElement
     victory: HTMLElement
+    playersLabel: HTMLElement
     players: HTMLElement
     ready: HTMLButtonElement
     start: HTMLButtonElement
@@ -62,23 +64,38 @@ export function createRoomLobby(handlers: RoomLobbyHandlers): RoomLobbyScreen {
     if (!state) return
     els.roomName.textContent = state.name
 
-    // --- ball colors: highlight mine, disable those taken by others ---
+    // --- ball colors + spectator toggle ---
+    // Picking a color makes you a player (claims a slot); picking Spectator frees
+    // your slot. When you're already a spectator and all player slots are full,
+    // the color swatches are disabled (no slot to claim).
+    const iSpectate = !!me()?.spectator
+    const noPlayerSlot = state.playerCount >= state.maxPlayers && iSpectate
     const mine = me()?.color
-    const takenByOthers = new Set(state.players.filter((p) => p.id !== myId).map((p) => p.color))
+    const takenByOthers = new Set(
+      state.players.filter((p) => p.id !== myId && !p.spectator).map((p) => p.color),
+    )
     els.colors.innerHTML = ''
     for (const c of BALL_COLORS) {
       const btn = document.createElement('button')
       btn.className = 'swatch'
       btn.style.background = c.hex
-      const selected = c.id === mine
+      const selected = !iSpectate && c.id === mine
       const taken = takenByOthers.has(c.id)
       btn.classList.toggle('selected', selected)
       btn.classList.toggle('taken', taken && !selected)
-      btn.disabled = taken && !selected
-      btn.title = c.id
+      btn.disabled = (taken && !selected) || noPlayerSlot
+      btn.title = noPlayerSlot ? 'All player slots are taken' : c.id
       if (!btn.disabled) btn.addEventListener('click', () => handlers.onSetColor(c.id))
       els.colors.appendChild(btn)
     }
+    // Spectator swatch — selecting it drops your player slot.
+    const spec = document.createElement('button')
+    spec.className = 'swatch spectate-swatch'
+    spec.textContent = '👁'
+    spec.classList.toggle('selected', iSpectate)
+    spec.title = 'Spectate'
+    spec.addEventListener('click', () => handlers.onSetSpectator(!iSpectate))
+    els.colors.appendChild(spec)
 
     // --- course list (host selects; others read-only) ---
     const host = iAmHost()
@@ -105,21 +122,28 @@ export function createRoomLobby(handlers: RoomLobbyHandlers): RoomLobbyScreen {
     }
 
     // --- players list ---
+    // Spectators show an eye badge and no ready state (and no ball dot); players
+    // show their color dot and ready status.
+    els.playersLabel.textContent = `Players (${state.playerCount}/${state.maxPlayers})`
     els.players.innerHTML = ''
     for (const p of state.players) {
       const row = document.createElement('div')
       row.className = 'player-row'
       const label = p.name && p.name.trim() ? p.name : `Player ${p.id}`
+      const status = p.spectator
+        ? '<span class="player-spectating">👁 Spectating</span>'
+        : `<span class="player-ready ${p.ready ? 'is-ready' : ''}">${p.ready ? '✔ Ready' : '…'}</span>`
       row.innerHTML = `
-        <span class="player-dot" style="background:${colorHex(p.color)}"></span>
+        <span class="player-dot" style="background:${p.spectator ? 'transparent' : colorHex(p.color)}"></span>
         <span class="player-name"></span>
         ${p.isHost ? '<span class="host-badge">HOST</span>' : ''}
-        <span class="player-ready ${p.ready ? 'is-ready' : ''}">${p.ready ? '✔ Ready' : '…'}</span>`
+        ${status}`
       row.querySelector('.player-name')!.textContent = label + (p.id === myId ? ' (you)' : '')
       els.players.appendChild(row)
     }
 
-    // --- ready button ---
+    // --- ready button (players only; spectators have nothing to ready up) ---
+    els.ready.style.display = iSpectate ? 'none' : ''
     const myReady = !!me()?.ready
     els.ready.classList.toggle('selected', myReady)
     els.ready.textContent = myReady ? 'Ready ✔' : 'Ready'
@@ -164,7 +188,7 @@ export function createRoomLobby(handlers: RoomLobbyHandlers): RoomLobbyScreen {
             </div>
             <div class="lobby-col">
               <section class="lobby-section">
-                <div class="lobby-label">Players</div>
+                <div class="lobby-label" data-players-label>Players</div>
                 <div class="players-list" data-players></div>
               </section>
               <div class="name-row">
@@ -194,6 +218,7 @@ export function createRoomLobby(handlers: RoomLobbyHandlers): RoomLobbyScreen {
         colors: q('[data-colors]'),
         courses: q('[data-courses]'),
         victory: q('[data-victory]'),
+        playersLabel: q('[data-players-label]'),
         players: q('[data-players]'),
         ready: q<HTMLButtonElement>('[data-ready]'),
         start: q<HTMLButtonElement>('[data-start]'),

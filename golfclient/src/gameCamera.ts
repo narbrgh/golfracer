@@ -359,8 +359,8 @@ export interface ControlsState {
   ballFrac: number
   greenLeftFrac: number
   greenRightFrac: number
-  // Accuracy sweep (3rd-press): show the green buffer band + power/accuracy %.
-  accPhase: boolean
+  // Ghost "hit" ball parked where power was captured; null before the 2nd press.
+  powerMarkerFrac: number | null
   powerPct: number | null        // captured power %, null before the 2nd press
   accuracyPct: number | null     // captured accuracy %, null before the 3rd press
 }
@@ -384,7 +384,7 @@ export interface GameChromeHandle {
   /** Sets the wind indicator (desktop: in the HUD pill; mobile: bottom-left). mph +right/-left. */
   setWind(mph: number): void
   /** Portrait only: push live control state into the DOM control bar. No-op in overlay mode. */
-  setControls(s: ControlsState): void
+  setControls(s: ControlsState | null): void
   /**
    * Reflects cam.mode into the arrows/cursor DOM. Call after any of *your own*
    * input handling that might have changed cam.mode (minimap click, keydown) —
@@ -470,6 +470,7 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
         <button class="gc-ctl-hit" data-hit>Hit!</button>
         <div class="gc-ctl-meter" data-meter>
           <div class="gc-ctl-meter-green" data-meter-green></div>
+          <div class="gc-ctl-meter-marker" data-meter-marker></div>
           <div class="gc-ctl-meter-ball" data-meter-ball></div>
           <div class="gc-ctl-meter-acc" data-meter-acc></div>
           <div class="gc-ctl-meter-pow" data-meter-pow></div>
@@ -488,6 +489,7 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
   const bunkerEl = root.querySelector<HTMLElement>('[data-bunker]')!
   const meterBallEl = root.querySelector<HTMLElement>('[data-meter-ball]')!
   const meterGreenEl = root.querySelector<HTMLElement>('[data-meter-green]')!
+  const meterMarkerEl = root.querySelector<HTMLElement>('[data-meter-marker]')!
   const meterAccEl = root.querySelector<HTMLElement>('[data-meter-acc]')!
   const meterPowEl = root.querySelector<HTMLElement>('[data-meter-pow]')!
   const meterEl = root.querySelector<HTMLElement>('[data-meter]')!
@@ -797,8 +799,11 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
       hudWindEl.textContent = txt
       windMobileEl.textContent = txt
     },
-    setControls(s: ControlsState) {
+    setControls(s: ControlsState | null) {
       if (!portrait) return
+      // Spectators (or any ball-less viewer) pass null — hide the controls entirely.
+      controlsEl.style.display = s === null ? 'none' : ''
+      if (s === null) return
       // Club/spin can't change mid-swing — grey the buttons while swinging.
       for (const btn of Array.from(controlsEl.querySelectorAll<HTMLButtonElement>('[data-club]'))) {
         btn.classList.toggle('active', btn.dataset.club === s.club)
@@ -810,11 +815,13 @@ export function mountGameChrome(host: HTMLElement, cam: GameCamera, opts: {
       }
       hitBtnEl.classList.toggle('active', s.swinging)
       meterBallEl.style.left = `${s.ballFrac * 100}%`
-      // Green accuracy band, symmetric around the origin, shown only during the
-      // accuracy sweep. Position/width from the track-fraction geometry.
+      // Green accuracy band, symmetric around the origin, always shown. Position/
+      // width from the track-fraction geometry.
       meterGreenEl.style.left = `${s.greenLeftFrac * 100}%`
       meterGreenEl.style.width = `${(s.greenRightFrac - s.greenLeftFrac) * 100}%`
-      meterGreenEl.classList.toggle('show', s.accPhase)
+      // Power marker ghost ball — parked at the captured-power position.
+      if (s.powerMarkerFrac !== null) meterMarkerEl.style.left = `${s.powerMarkerFrac * 100}%`
+      meterMarkerEl.classList.toggle('show', s.powerMarkerFrac !== null)
       // Readouts: accuracy on the left, power on the right.
       meterAccEl.textContent = s.accuracyPct !== null ? `A ${s.accuracyPct}%` : ''
       meterAccEl.classList.toggle('duff', s.accuracyPct !== null && s.accuracyPct < 60)

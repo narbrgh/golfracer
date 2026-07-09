@@ -56,6 +56,7 @@ export interface LobbyPlayer {
   color: string
   ready: boolean
   isHost: boolean
+  spectator: boolean
 }
 
 export interface RoomState {
@@ -63,7 +64,9 @@ export interface RoomState {
   name: string
   hostId: number
   status: string
-  maxPlayers: number
+  maxPlayers: number // active-player cap (4)
+  maxOccupants: number // total people cap (6)
+  playerCount: number // current non-spectator members
   courseId: string
   victory: string
   canStart: boolean
@@ -153,6 +156,7 @@ export class LobbyNet {
   setName(name: string): void { this.send({ type: 'setName', name }) }
   setColor(color: string): void { this.send({ type: 'setColor', color }) }
   setReady(ready: boolean): void { this.send({ type: 'setReady', ready }) }
+  setSpectator(spectator: boolean): void { this.send({ type: 'setSpectator', spectator }) }
   chat(text: string): void { this.send({ type: 'chat', text }) }
   setCourse(courseId: string): void { this.send({ type: 'setCourse', courseId }) }
   setVictory(victory: string): void { this.send({ type: 'setVictory', victory }) }

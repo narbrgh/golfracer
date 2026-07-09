@@ -237,6 +237,10 @@ export class SwingEngine {
   // Last power/accuracy % captured, for the HUD readouts. null = not shown.
   lastPowerPct: number | null = null
   lastAccuracyPct: number | null = null
+  // Meter position where power was captured (2nd press), so a ghost "hit" ball
+  // stays parked there through the accuracy sweep — a visual record of how hard
+  // you hit it. null = no power captured yet (cleared on new swing / rest).
+  powerMarkerPct: number | null = null
 
   ballColorHex: string
 
@@ -290,6 +294,7 @@ export class SwingEngine {
       if (this.meterPhase === 'frozen') {
         this.meterPhase = 'idle'; this.meterPct = 0
         this.lastPowerPct = null; this.lastAccuracyPct = null
+        this.powerMarkerPct = null
       }
     }
     this.wasReady = ready
@@ -304,6 +309,7 @@ export class SwingEngine {
     this.aimAngle = this.nonPutterAimAngle = holeX >= ballX ? -Math.PI / 4 : (-3 * Math.PI) / 4
     this.meterPhase = 'idle'; this.meterPct = 0
     this.lastPowerPct = null; this.lastAccuracyPct = null
+    this.powerMarkerPct = null
   }
 
   // Selects a club. When switching TO the putter, auto-aims it toward the hole
@@ -457,12 +463,15 @@ export class SwingEngine {
     if (this.meterPhase === 'idle') {
       this.meterPhase = 'rising'; this.meterPhaseStartMs = nowMs; this.meterPct = 0
       this.lastPowerPct = null; this.lastAccuracyPct = null
+      this.powerMarkerPct = null
       return null
     }
 
     if (this.meterPhase === 'rising' || this.meterPhase === 'falling') {
       this.capturedPower = this.meterPct
       this.lastPowerPct = Math.round(this.capturedPower)
+      // Park a ghost ball at the power position for the rest of the swing.
+      this.powerMarkerPct = this.meterPct
 
       // The putter uses neither spin nor angle, so the accuracy hit is pointless:
       // press 2 fires straight away (2-press swing), always dead-on, never a duff.
@@ -729,19 +738,17 @@ export class SwingEngine {
     ctx.fillStyle = 'rgba(128,128,128,0.5)'; ctx.fill()
     ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke()
 
-    // Green accuracy buffer band — symmetric ±GREEN_HALF around the 0 origin,
-    // shown only during the accuracy sweep. Ticks and the ball draw on top.
-    const accPhase = this.meterPhase === 'acc-rising' || this.meterPhase === 'acc-falling'
-    if (accPhase) {
-      ctx.save()
-      ctx.beginPath()
-      ctx.roundRect(trackLeft, L.meterY, trackW, METER_H, METER_H / 2)
-      ctx.clip()
-      ctx.fillStyle = 'rgba(120,220,120,0.45)'
-      const gx = posToX(-GREEN_HALF)
-      ctx.fillRect(gx, L.meterY, posToX(GREEN_HALF) - gx, METER_H)
-      ctx.restore()
-    }
+    // Green accuracy buffer band — symmetric ±GREEN_HALF around the 0 origin.
+    // Always shown (even before the swing) so the aim target is visible; ticks,
+    // the power marker, and the live ball draw on top.
+    ctx.save()
+    ctx.beginPath()
+    ctx.roundRect(trackLeft, L.meterY, trackW, METER_H, METER_H / 2)
+    ctx.clip()
+    ctx.fillStyle = 'rgba(120,220,120,0.45)'
+    const gx = posToX(-GREEN_HALF)
+    ctx.fillRect(gx, L.meterY, posToX(GREEN_HALF) - gx, METER_H)
+    ctx.restore()
 
     // % readouts above the meter (clearing the bottom tick labels): ACCURACY on
     // the LEFT (green ≥ threshold, red duff), POWER on the RIGHT (white).
@@ -777,6 +784,16 @@ export class SwingEngine {
       if (long) ctx.fillText(String(p), tx, L.meterY + METER_H + 8)
     }
 
+    // Power marker — a ghost ball parked where power was captured, so you can
+    // see how hard you hit it while the accuracy ball sweeps.
+    if (this.powerMarkerPct !== null) {
+      const mx = posToX(this.powerMarkerPct)
+      ctx.beginPath()
+      ctx.arc(mx, L.meterY + METER_H / 2, BALL_R, 0, Math.PI * 2)
+      ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.fill()
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke()
+    }
+
     // Ball tracks the live signed meter position (0 at rest, can dip into the
     // underhang during the accuracy sweep).
     const ballX = posToX(this.meterPct)
@@ -792,15 +809,12 @@ export class SwingEngine {
   /** True while a swing meter is sweeping (used by DOM controls to highlight Hit!). */
   isSwinging(): boolean { return this.meterPhase !== 'idle' }
 
-  /** True during the accuracy sweep (after power is set) — DOM shows the green band. */
-  isAccuracyPhase(): boolean { return this.meterPhase === 'acc-rising' || this.meterPhase === 'acc-falling' }
-
   /**
    * Meter geometry for the DOM mirror, all as fractions (0-1) of the FULL
    * extended track (underhang + main). Lets the DOM place the ball, the 0
    * origin, and the symmetric green band without knowing the constants.
    */
-  meterGeom(): { ballFrac: number; originFrac: number; greenLeftFrac: number; greenRightFrac: number } {
+  meterGeom(): { ballFrac: number; originFrac: number; greenLeftFrac: number; greenRightFrac: number; powerMarkerFrac: number | null } {
     const span = UNDERHANG_PCT + 100 // total track width in pct units
     const toFrac = (pos: number) => (pos + UNDERHANG_PCT) / span
     return {
@@ -808,6 +822,7 @@ export class SwingEngine {
       originFrac: toFrac(0),
       greenLeftFrac: toFrac(-GREEN_HALF),
       greenRightFrac: toFrac(GREEN_HALF),
+      powerMarkerFrac: this.powerMarkerPct !== null ? toFrac(this.powerMarkerPct) : null,
     }
   }
 

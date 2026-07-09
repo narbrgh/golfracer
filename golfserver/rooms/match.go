@@ -264,22 +264,24 @@ func (mt *Match) loadHole(idx int) {
 	hole := mt.holes[idx]
 	mt.geom = holegeom.Build(hole)
 
-	// Previous hole's winner takes the back tee (farther from the pit); everyone
-	// else starts on the forward tee. First hole (no winner yet) defaults to the
-	// first ball on the back tee. Multiple balls sharing a tee are staggered.
-	backID := mt.lastWinnerID
-	if backID == 0 && len(mt.balls) > 0 {
-		backID = mt.balls[0].playerID
+	// Rank-based tee assignment: the standings leader takes tee[0] (the "back"
+	// tee), the runner-up tee[1], and so on. The previous hole's winner is seeded
+	// as rank 1 (mirrors the old winner-starts-back rule). First hole (no results
+	// yet) falls back to ball order. If there are more players than tees, the
+	// overflow shares the last tee, staggered by 28px.
+	ranked := mt.rankedBalls()
+	tees := hole.Tees
+	if len(tees) == 0 {
+		tees = []float64{0}
 	}
-	backN, fwdN := 0, 0
-	for _, b := range mt.balls {
+	overflow := 0
+	for i, b := range ranked {
 		var x float64
-		if b.playerID == backID {
-			x = hole.TeeBackX + float64(backN)*28
-			backN++
+		if i < len(tees) {
+			x = tees[i]
 		} else {
-			x = hole.TeeForwardX + float64(fwdN)*28
-			fwdN++
+			x = tees[len(tees)-1] + float64(overflow+1)*28
+			overflow++
 		}
 		y := mt.geom.CTY(x) - holegeom.TeeH - matchBallRadius
 		b.ball = physics.NewBall(x, y, matchBallRadius)
@@ -292,6 +294,34 @@ func (mt *Match) loadHole(idx int) {
 		b.sinkTicksLeft = 0
 	}
 	mt.sendHole(idx)
+}
+
+// rankedBalls returns the balls ordered best-standings first, for tee assignment.
+// The previous hole's winner is forced to rank 1 (mirrors the old winner-starts-
+// back rule). The rest are ordered by the match victory condition: fewest total
+// ticks for "time", most holes won for "holes". Before any hole completes this is
+// just the balls' natural (join) order.
+func (mt *Match) rankedBalls() []*matchBall {
+	ranked := make([]*matchBall, len(mt.balls))
+	copy(ranked, mt.balls)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		a, b := ranked[i], ranked[j]
+		if mt.lastWinnerID != 0 {
+			if a.playerID == mt.lastWinnerID {
+				return true
+			}
+			if b.playerID == mt.lastWinnerID {
+				return false
+			}
+		}
+		if mt.victory == "holes" {
+			if a.holesWon != b.holesWon {
+				return a.holesWon > b.holesWon
+			}
+		}
+		return a.totalTicks < b.totalTicks
+	})
+	return ranked
 }
 
 func (mt *Match) simulate() {
@@ -588,10 +618,17 @@ func (m *Manager) BeginMatch(roomID string, holes []terrain.Hole) {
 		return
 	}
 	ids := make([]int, 0, len(r.Members))
-	for id := range r.Members {
+	for id, p := range r.Members {
+		if p.Spectator {
+			continue // spectators watch; they don't become balls
+		}
 		ids = append(ids, id)
 	}
 	sort.Ints(ids)
+	if len(ids) == 0 {
+		m.mu.Unlock()
+		return
+	}
 	balls := make([]*matchBall, 0, len(ids))
 	for _, id := range ids {
 		p := r.Members[id]

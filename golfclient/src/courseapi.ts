@@ -3,7 +3,7 @@
 // Migration of old files happens server-side, so everything returned here is
 // already current-format.
 import type { Course, Hole } from './terrain'
-import { DEFAULT_HOLE, CURRENT_FORMAT_VERSION } from './terrain'
+import { DEFAULT_HOLE, CURRENT_FORMAT_VERSION, normalizeTees } from './terrain'
 
 // HTTP base for the Go server. The WebSocket uses the same origin.
 function getApiBase(): string {
@@ -28,7 +28,11 @@ export async function listCourses(): Promise<CourseInfo[]> {
 export async function getCourse(id: string): Promise<Course> {
   const r = await fetch(`${BASE}/courses/${encodeURIComponent(id)}`)
   if (!r.ok) throw new Error(`get course ${id}: ${r.status}`)
-  return r.json()
+  const c: Course = await r.json()
+  // Defensive: migrate any legacy two-tee holes to the tees[] schema. The server
+  // normally does this on load, but keep the client robust to older payloads.
+  for (const h of c.holes) normalizeTees(h)
+  return c
 }
 
 export async function saveCourse(c: Course): Promise<Course> {

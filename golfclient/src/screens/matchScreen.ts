@@ -3,7 +3,7 @@ import '../gameChrome.css'
 import type { Screen } from './screenManager'
 import type { MatchHole, MatchState, MatchLeaderboard, MatchBall } from '../lobbyNet'
 import type { Hole, BuiltSegment, SplineCoeff } from '../terrain'
-import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs } from '../terrain'
+import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs, normalizeTees } from '../terrain'
 import { colorHex } from './roomLobby'
 import { GameCamera, mountGameChrome } from '../gameCamera'
 import { SwingEngine, formatDistance, airStep, WIND_MPH_SCALE } from '../swing'
@@ -97,6 +97,24 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   let boardEl!: HTMLElement
   let chrome!: ReturnType<typeof mountGameChrome>
 
+  // Offscreen cache for the static world (terrain, water, bunkers, hole, tees,
+  // flag, border). It's re-baked only when the camera moves or the hole/canvas
+  // changes — so a settled camera (e.g. during the Hit! meter) collapses the
+  // whole scene to a single drawImage instead of re-tracing every path.
+  const staticCanvas: HTMLCanvasElement = document.createElement('canvas')
+  const staticCtx: CanvasRenderingContext2D = staticCanvas.getContext('2d')!
+  let staticDirty = true
+  // Snapshot of the camera/canvas state the offscreen was last baked at.
+  let bakedCamX = NaN, bakedCamY = NaN, bakedZoom = NaN, bakedCW = 0, bakedCH = 0, bakedDpr = 0
+
+  // Sub-pixel easing tails shouldn't force a re-bake every frame; a re-bake only
+  // matters once the change is visible (~half a device pixel).
+  const camMoved = (dpr: number): boolean =>
+    canvas.width !== bakedCW || canvas.height !== bakedCH || dpr !== bakedDpr ||
+    Math.abs(cam.zoom - bakedZoom) > 1e-4 ||
+    Math.abs((cam.camX - bakedCamX) * cam.zoom) > 0.5 / dpr ||
+    Math.abs((cam.camY - bakedCamY) * cam.zoom) > 0.5 / dpr
+
   const tY = (x: number): number => {
     if (!hole) return 0
     const s = hole.useSpline, w = hole.useWaves
@@ -108,6 +126,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
 
   function rebuildCaches() {
     if (!hole) return
+    staticDirty = true
     segs = buildSegments(hole)
     spline = buildSpline(hole.controlPoints)
     const off = baseOffset(hole)
@@ -131,6 +150,10 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
 
   const myBall = (): MatchBall | undefined =>
     myId == null ? undefined : state?.balls.find((b) => b.playerId === myId)
+
+  // A spectator is a member with no ball of their own once a match is running.
+  // They watch passively — no aim, no swing HUD, no controls.
+  const isSpectator = (): boolean => !!state && state.balls.length > 0 && !myBall()
 
   const shotRemainingMs = (b: MatchBall): number => Math.max(0, (b.readyInMs ?? 0) - (performance.now() - stateAt))
 
@@ -212,81 +235,126 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     }
   }
 
-  function draw() {
-    ctx.fillStyle = '#050505'
-    ctx.fillRect(0, 0, cam.cw, cam.ch)
+  // Draws the void + static world into context `g` (the offscreen), applying the
+  // current dpr + camera transform so its output is a screen-space bitmap ready
+  // to blit 1:1. Kept byte-identical to the previous inline block.
+  function drawStaticWorld(g: CanvasRenderingContext2D, dpr: number) {
     if (!hole) return
     const h = hole
     const th = hole.theme
     const iz = 1 / cam.zoom // keep certain strokes a constant screen width regardless of zoom
 
-    ctx.save()
-    ctx.scale(cam.zoom, cam.zoom)
-    ctx.translate(-cam.camX, -cam.camY)
-    ctx.beginPath()
-    ctx.rect(0, 0, h.worldW, h.worldH)
-    ctx.clip()
+    g.setTransform(dpr, 0, 0, dpr, 0, 0)
+    g.fillStyle = '#050505'
+    g.fillRect(0, 0, cam.cw, cam.ch)
 
-    const sky = ctx.createLinearGradient(0, cam.camY, 0, cam.camY + cam.ch / cam.zoom)
+    g.save()
+    g.scale(cam.zoom, cam.zoom)
+    g.translate(-cam.camX, -cam.camY)
+    g.beginPath()
+    g.rect(0, 0, h.worldW, h.worldH)
+    g.clip()
+
+    const sky = g.createLinearGradient(0, cam.camY, 0, cam.camY + cam.ch / cam.zoom)
     sky.addColorStop(0, th.skyTop)
     sky.addColorStop(1, th.skyBottom)
-    ctx.fillStyle = sky
-    ctx.fillRect(0, 0, h.worldW, h.worldH)
+    g.fillStyle = sky
+    g.fillRect(0, 0, h.worldW, h.worldH)
 
     for (const p of waterPools) {
-      const g = ctx.createLinearGradient(0, p.level, 0, p.floorY)
-      g.addColorStop(0, hexWithAlpha(th.waterFill, 0.92))
-      g.addColorStop(1, hexWithAlpha(th.waterFill, 0.97))
-      ctx.fillStyle = g
-      ctx.fillRect(p.left, p.level, p.right - p.left, h.worldH - p.level)
-      ctx.strokeStyle = hexWithAlpha(th.waterLine, 0.7)
-      ctx.lineWidth = th.waterLineW * iz
-      ctx.beginPath(); ctx.moveTo(p.left, p.level); ctx.lineTo(p.right, p.level); ctx.stroke()
+      const wg = g.createLinearGradient(0, p.level, 0, p.floorY)
+      wg.addColorStop(0, hexWithAlpha(th.waterFill, 0.92))
+      wg.addColorStop(1, hexWithAlpha(th.waterFill, 0.97))
+      g.fillStyle = wg
+      g.fillRect(p.left, p.level, p.right - p.left, h.worldH - p.level)
+      g.strokeStyle = hexWithAlpha(th.waterLine, 0.7)
+      g.lineWidth = th.waterLineW * iz
+      g.beginPath(); g.moveTo(p.left, p.level); g.lineTo(p.right, p.level); g.stroke()
     }
     for (const bk of bunkerPools) {
-      ctx.beginPath()
-      ctx.moveTo(bk.leftX, splineY(bk.leftX, bk.coeffs))
-      for (let x = bk.leftX + 5; x <= bk.rightX; x += 5) ctx.lineTo(x, splineY(x, bk.coeffs))
-      ctx.lineTo(bk.rightX, h.worldH)
-      ctx.lineTo(bk.leftX, h.worldH)
-      ctx.closePath()
-      ctx.fillStyle = 'rgba(210,185,100,0.88)'
-      ctx.fill()
+      g.beginPath()
+      g.moveTo(bk.leftX, splineY(bk.leftX, bk.coeffs))
+      for (let x = bk.leftX + 5; x <= bk.rightX; x += 5) g.lineTo(x, splineY(x, bk.coeffs))
+      g.lineTo(bk.rightX, h.worldH)
+      g.lineTo(bk.leftX, h.worldH)
+      g.closePath()
+      g.fillStyle = 'rgba(210,185,100,0.88)'
+      g.fill()
     }
 
     const hL = h.holeX - HOLE_W / 2
     const hR = h.holeX + HOLE_W / 2
     const floorY = tY(h.holeX) + HOLE_D
     const path = () => {
-      ctx.moveTo(0, tY(0))
+      g.moveTo(0, tY(0))
       let x = 20
-      while (x < hL) { ctx.lineTo(x, tY(x)); x += 20 }
-      ctx.lineTo(hL, tY(hL)); ctx.lineTo(hL, floorY)
-      ctx.lineTo(hR, floorY); ctx.lineTo(hR, tY(hR))
+      while (x < hL) { g.lineTo(x, tY(x)); x += 20 }
+      g.lineTo(hL, tY(hL)); g.lineTo(hL, floorY)
+      g.lineTo(hR, floorY); g.lineTo(hR, tY(hR))
       x = Math.ceil(hR / 20) * 20
-      while (x <= h.worldW) { ctx.lineTo(x, tY(x)); x += 20 }
+      while (x <= h.worldW) { g.lineTo(x, tY(x)); x += 20 }
     }
-    ctx.beginPath(); path()
-    ctx.lineTo(h.worldW, h.worldH); ctx.lineTo(0, h.worldH); ctx.closePath()
-    ctx.fillStyle = th.groundFill; ctx.fill()
-    const pg = ctx.createLinearGradient(0, Math.min(tY(hL), tY(hR)), 0, floorY)
+    g.beginPath(); path()
+    g.lineTo(h.worldW, h.worldH); g.lineTo(0, h.worldH); g.closePath()
+    g.fillStyle = th.groundFill; g.fill()
+    const pg = g.createLinearGradient(0, Math.min(tY(hL), tY(hR)), 0, floorY)
     pg.addColorStop(0, '#0c0c14'); pg.addColorStop(1, '#040406')
-    ctx.fillStyle = pg
-    ctx.fillRect(hL, Math.min(tY(hL), tY(hR)), hR - hL, floorY - Math.min(tY(hL), tY(hR)))
-    ctx.beginPath(); path()
-    ctx.strokeStyle = th.groundLine; ctx.lineWidth = th.groundLineW * iz; ctx.stroke()
+    g.fillStyle = pg
+    g.fillRect(hL, Math.min(tY(hL), tY(hR)), hR - hL, floorY - Math.min(tY(hL), tY(hR)))
+    g.beginPath(); path()
+    g.strokeStyle = th.groundLine; g.lineWidth = th.groundLineW * iz; g.stroke()
 
-    ctx.fillStyle = '#fff'
-    for (const tx of [h.teeBackX, h.teeForwardX]) ctx.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
+    g.fillStyle = '#fff'
+    for (const tx of h.tees) g.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
 
     const fx = h.holeX + HOLE_W / 2, fy = tY(h.holeX + HOLE_W / 2)
-    ctx.strokeStyle = '#bbb'; ctx.lineWidth = 2 * iz
-    ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(fx, fy - 55); ctx.stroke()
-    ctx.fillStyle = '#e44'
-    ctx.beginPath(); ctx.moveTo(fx, fy - 55); ctx.lineTo(fx + 22, fy - 45); ctx.lineTo(fx, fy - 35); ctx.closePath(); ctx.fill()
+    g.strokeStyle = '#bbb'; g.lineWidth = 2 * iz
+    g.beginPath(); g.moveTo(fx, fy); g.lineTo(fx, fy - 55); g.stroke()
+    g.fillStyle = '#e44'
+    g.beginPath(); g.moveTo(fx, fy - 55); g.lineTo(fx + 22, fy - 45); g.lineTo(fx, fy - 35); g.closePath(); g.fill()
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 6 * iz
-    ctx.strokeRect(0, 0, h.worldW, h.worldH)
+    g.strokeStyle = 'rgba(255,255,255,0.85)'; g.lineWidth = 6 * iz
+    g.strokeRect(0, 0, h.worldW, h.worldH)
+    g.restore()
+  }
+
+  function draw() {
+    if (!hole) {
+      ctx.fillStyle = '#050505'
+      ctx.fillRect(0, 0, cam.cw, cam.ch)
+      return
+    }
+    const h = hole
+    const iz = 1 / cam.zoom // keep certain strokes a constant screen width regardless of zoom
+    const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1
+
+    // Bake the static world offscreen only when it can actually have changed:
+    // hole/canvas swap (staticDirty) or a visible camera move. A settled camera
+    // (during the Hit! meter, resting balls) reuses the last bitmap.
+    if (staticCanvas.width !== canvas.width || staticCanvas.height !== canvas.height) {
+      staticCanvas.width = canvas.width
+      staticCanvas.height = canvas.height
+      staticDirty = true
+    }
+    if (staticDirty || camMoved(dpr)) {
+      drawStaticWorld(staticCtx, dpr)
+      bakedCamX = cam.camX; bakedCamY = cam.camY; bakedZoom = cam.zoom
+      bakedCW = canvas.width; bakedCH = canvas.height; bakedDpr = dpr
+      staticDirty = false
+    }
+
+    // Blit the baked static world (screen-space, backing-store pixels → CSS box).
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.drawImage(staticCanvas, 0, 0)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+    // Dynamic layer shares the same world transform the static bake used.
+    ctx.save()
+    ctx.scale(cam.zoom, cam.zoom)
+    ctx.translate(-cam.camX, -cam.camY)
+    ctx.beginPath()
+    ctx.rect(0, 0, h.worldW, h.worldH)
+    ctx.clip()
 
     if (state) {
       const now = performance.now()
@@ -396,15 +464,19 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         chrome.miniCtx.clearRect(0, 0, b.w, b.h)
         cam.drawMinimapInBox(chrome.miniCtx, b, (mwx, mwy) => drawMiniContent(b, mwx, mwy))
       }
-      const mgeom = swing.meterGeom()
-      chrome.setControls({
-        club: swing.club, spin: swing.spin,
-        swinging: swing.isSwinging(),
-        bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
-        ballFrac: mgeom.ballFrac, greenLeftFrac: mgeom.greenLeftFrac, greenRightFrac: mgeom.greenRightFrac,
-        accPhase: swing.isAccuracyPhase(),
-        powerPct: swing.lastPowerPct, accuracyPct: swing.lastAccuracyPct,
-      })
+      if (isSpectator()) {
+        chrome.setControls(null)
+      } else {
+        const mgeom = swing.meterGeom()
+        chrome.setControls({
+          club: swing.club, spin: swing.spin,
+          swinging: swing.isSwinging(),
+          bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
+          ballFrac: mgeom.ballFrac, greenLeftFrac: mgeom.greenLeftFrac, greenRightFrac: mgeom.greenRightFrac,
+          powerMarkerFrac: mgeom.powerMarkerFrac,
+          powerPct: swing.lastPowerPct, accuracyPct: swing.lastAccuracyPct,
+        })
+      }
     } else {
       const miniBox = cam.miniBox()
       cam.drawMinimapFrame(ctx, (mwx, mwy) => drawMiniContent(miniBox, mwx, mwy))
@@ -414,7 +486,8 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         ctx.fillText(`hole: ${formatDistance(holeDistPx)}`, miniBox.x + 2, miniBox.y + miniBox.h + 18)
       }
       // Swing HUD (club/spin selectors + Hit! meter), drawn last, screen space.
-      swing.drawHud(ctx, cam.cw, cam.ch, chrome.insets)
+      // Spectators have no ball to swing, so skip it.
+      if (!isSpectator()) swing.drawHud(ctx, cam.cw, cam.ch, chrome.insets)
     }
   }
 
@@ -476,7 +549,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
           ballMoving: moving,
         })
       } else {
-        cam.update({ x: (hole.teeBackX + hole.holeX) / 2, y: tY((hole.teeBackX + hole.holeX) / 2) })
+        cam.update({ x: (hole.tees[0] + hole.holeX) / 2, y: tY((hole.tees[0] + hole.holeX) / 2) })
       }
     }
     draw()
@@ -667,15 +740,15 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     },
     setMyId(id) { myId = id },
     setHole(m) {
-      hole = m.hole
+      hole = normalizeTees(m.hole)
       windMph = m.wind ?? 0
       render.clear()
       rebuildCaches()
       myWasMoving = false; cam.endShot()
       cam.setWorld(hole.worldW, hole.worldH)
-      cam.centerOn(hole.teeBackX, tY(hole.teeBackX))
+      cam.centerOn(hole.tees[0], tY(hole.tees[0]))
       // Each hole starts with the driver, no spin, aimed 45° toward the hole.
-      swing.resetForHole(hole.holeX, hole.teeBackX)
+      swing.resetForHole(hole.holeX, hole.tees[0])
     },
     setState(m) {
       state = m

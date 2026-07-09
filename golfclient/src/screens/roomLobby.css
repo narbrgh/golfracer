@@ -107,6 +107,14 @@
   cursor: default;
 }
 .swatch.taken:hover { transform: none; }
+.swatch:disabled { opacity: 0.35; cursor: default; }
+.swatch:disabled:hover { transform: none; }
+.spectate-swatch {
+  background: rgba(36, 64, 90, 0.08);
+  font-size: 16px;
+  line-height: 30px;
+}
+.player-spectating { font-size: 13px; color: #97a39a; flex: 0 0 auto; font-style: italic; }
 
 /* ---- Course list ---- */
 .course-list { display: flex; flex-direction: column; gap: 8px; max-height: 168px; overflow-y: auto; }

@@ -53,6 +53,7 @@ const lobby = createRoomLobby({
   onSetName: (name) => lobbyNet.setName(name),
   onSetColor: (color) => lobbyNet.setColor(color),
   onSetReady: (ready) => lobbyNet.setReady(ready),
+  onSetSpectator: (spectator) => lobbyNet.setSpectator(spectator),
   onChat: (text) => lobbyNet.chat(text),
   onSetCourse: (courseId) => lobbyNet.setCourse(courseId),
   onSetVictory: (victory) => lobbyNet.setVictory(victory),

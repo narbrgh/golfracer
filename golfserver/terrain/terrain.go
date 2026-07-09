@@ -289,9 +289,15 @@ type Hole struct {
 	WorldW        float64          `json:"worldW"`
 	WorldH        float64          `json:"worldH"`
 	BaseGround    float64          `json:"baseGround"`
-	TeeBackX      float64          `json:"teeBackX"`
-	TeeForwardX   float64          `json:"teeForwardX"`
-	HoleX         float64          `json:"holeX"`
+	// Tees are the per-player starting X positions (1–4). The first tee is the
+	// "back" tee taken by the standings leader; the rest are filled in order.
+	Tees []float64 `json:"tees"`
+	// TeeBackX/TeeForwardX are the legacy two-tee fields, kept only so old saved
+	// courses still deserialize. NormalizeTees folds them into Tees on load; new
+	// code should read Tees exclusively.
+	TeeBackX    float64 `json:"teeBackX,omitempty"`
+	TeeForwardX float64 `json:"teeForwardX,omitempty"`
+	HoleX       float64 `json:"holeX"`
 	UseSpline     bool             `json:"useSpline"`
 	ControlPoints []ControlPoint   `json:"controlPoints"`
 	UseWaves      bool             `json:"useWaves"`
@@ -370,8 +376,7 @@ func DefaultHole() Hole {
 		WorldW:      4000,
 		WorldH:      1000,
 		BaseGround:  650,
-		TeeBackX:    200,
-		TeeForwardX: 400,
+		Tees:        []float64{200, 320, 440, 560},
 		HoleX:       3700,
 		UseSpline:   false,
 		ControlPoints: []ControlPoint{
@@ -409,4 +414,23 @@ func DefaultHole() Hole {
 			SunSize:     32,
 		},
 	}
+}
+
+// NormalizeTees folds the legacy TeeBackX/TeeForwardX fields into the Tees list
+// for holes saved before the multi-tee schema, and clamps to at most 4 tees. It
+// is idempotent: a hole that already has Tees is left untouched (aside from the
+// clamp), so it's safe to call on every load.
+func (h *Hole) NormalizeTees() {
+	if len(h.Tees) == 0 {
+		if h.TeeBackX != 0 || h.TeeForwardX != 0 {
+			h.Tees = []float64{h.TeeBackX, h.TeeForwardX}
+		} else {
+			h.Tees = append([]float64(nil), DefaultHole().Tees...)
+		}
+	}
+	if len(h.Tees) > 4 {
+		h.Tees = h.Tees[:4]
+	}
+	// Clear the legacy fields so re-serialized courses carry only Tees.
+	h.TeeBackX, h.TeeForwardX = 0, 0
 }

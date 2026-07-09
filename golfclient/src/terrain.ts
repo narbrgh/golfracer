@@ -249,8 +249,11 @@ export interface Hole {
   worldW: number
   worldH: number
   baseGround: number
-  teeBackX: number
-  teeForwardX: number
+  // Per-player starting X positions (1–4). tees[0] is the "back" tee. Legacy
+  // files with teeBackX/teeForwardX are migrated into this on load (normalizeTees).
+  tees: number[]
+  teeBackX?: number // legacy, deserialize-only
+  teeForwardX?: number // legacy, deserialize-only
   holeX: number
   useSpline: boolean
   controlPoints: ControlPoint[]
@@ -331,8 +334,7 @@ export const DEFAULT_HOLE: Hole = {
   worldW: 4000,
   worldH: 1000,
   baseGround: 650,
-  teeBackX: 200,
-  teeForwardX: 400,
+  tees: [200, 320, 440, 560],
   holeX: 3700,
   useSpline: false,
   controlPoints: [
@@ -361,4 +363,22 @@ export const DEFAULT_HOLE: Hole = {
   // Own copy, not the shared DEFAULT_THEME reference — otherwise a hole that ends
   // up aliasing this object could mutate the global default in place.
   theme: { ...DEFAULT_THEME },
+}
+
+// normalizeTees migrates a hole in place to the multi-tee schema: it folds the
+// legacy teeBackX/teeForwardX fields into a tees[] list (defaulting when absent)
+// and clamps to at most 4 tees. Safe to call on every load — idempotent for holes
+// that already have tees[].
+export function normalizeTees(h: Hole): Hole {
+  if (!Array.isArray(h.tees) || h.tees.length === 0) {
+    if (h.teeBackX != null || h.teeForwardX != null) {
+      h.tees = [h.teeBackX ?? 0, h.teeForwardX ?? 0]
+    } else {
+      h.tees = [...DEFAULT_HOLE.tees]
+    }
+  }
+  if (h.tees.length > 4) h.tees = h.tees.slice(0, 4)
+  delete h.teeBackX
+  delete h.teeForwardX
+  return h
 }

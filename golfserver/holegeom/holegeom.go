@@ -115,8 +115,9 @@ func Build(hole terrain.Hole) Geometry {
 		y := cty(teeX) - TeeH
 		edges = append(edges, physics.NewEdge(teeX-TeeHalfW, y, teeX+TeeHalfW, y))
 	}
-	addTee(hole.TeeBackX)
-	addTee(hole.TeeForwardX)
+	for _, teeX := range hole.Tees {
+		addTee(teeX)
+	}
 
 	for _, plat := range hole.Platforms {
 		if len(plat.Points) < 3 {

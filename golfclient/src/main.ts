@@ -132,15 +132,16 @@ function ballInBunker(): boolean {
 // terrain/water/bunker caches from it.
 function updateHole(h: Hole) {
   hole = h
+  staticDirty = true
   builtSegs = buildSegments(h)
   splineCoeffs = buildSpline(h.controlPoints)
   rebuildWaterPools()
   rebuildBunkerPools()
   cam.setWorld(h.worldW, h.worldH)
-  cam.centerOn(h.teeBackX, tY(h.teeBackX))
+  cam.centerOn(h.tees[0], tY(h.tees[0]))
   holeStartMs = Date.now()
   // Each hole starts with the driver, no spin, aimed 45° toward the hole.
-  swing.resetForHole(h.holeX, h.teeBackX)
+  swing.resetForHole(h.holeX, h.tees[0])
 }
 
 // advanceHole moves single-player play to the next hole after a sink, wrapping
@@ -187,6 +188,27 @@ const chrome = mountGameChrome(host, cam, {
 })
 const canvas = chrome.canvas
 const ctx = chrome.ctx
+
+// Offscreen cache for the static world (sky, sun/mountains, terrain, water,
+// bunkers, platforms, hole, tees, flag, border). Re-baked only on a hole/canvas
+// change or a visible camera move, then blitted each frame — so a settled camera
+// (during the Hit! meter, resting ball) skips re-tracing the whole scene.
+const staticCanvas = document.createElement('canvas')
+const staticCtx = staticCanvas.getContext('2d')!
+let staticDirty = true
+let bakedCamX = NaN, bakedCamY = NaN, bakedZoom = NaN, bakedCW = 0, bakedCH = 0
+
+const dprOf = () => (typeof window !== 'undefined' && window.devicePixelRatio) || 1
+
+// A re-bake only matters once the camera has moved by ~half a device pixel; this
+// keeps sub-pixel easing tails from forcing a re-bake every frame.
+function staticCamMoved(): boolean {
+  const dpr = dprOf()
+  return canvas.width !== bakedCW || canvas.height !== bakedCH ||
+    Math.abs(cam.zoom - bakedZoom) > 1e-4 ||
+    Math.abs((cam.camX - bakedCamX) * cam.zoom) > 0.5 / dpr ||
+    Math.abs((cam.camY - bakedCamY) * cam.zoom) > 0.5 / dpr
+}
 
 // ---- Cutouts ----
 // Only the hole gaps the terrain (it's a real pit the ball drops through). Water
@@ -271,8 +293,8 @@ function drawHazards() {
 }
 
 // ---- State ----
-let physBallX = hole.teeBackX
-let physBallY = tY(hole.teeBackX) - TEE_H - BALL_RADIUS
+let physBallX = hole.tees[0]
+let physBallY = tY(hole.tees[0]) - TEE_H - BALL_RADIUS
 let ballX = physBallX, ballY = physBallY
 let prevResting = true
 let restingDebounceStart: number | null = null
@@ -466,7 +488,11 @@ function drawMinimapContent(mc: CanvasRenderingContext2D, box: { x: number; y: n
 }
 
 // ---- Draw ----
-function draw() {
+// The static world (void + sky through flag). Drawn onto the main ctx (so all
+// the existing helpers, which target ctx directly, work unchanged), then
+// captured into the offscreen by the caller. Assumes ctx is at the identity/dpr
+// base transform on entry; sets up and tears down its own world transform.
+function drawStaticWorld() {
   // Void outside world bounds
   ctx.fillStyle = '#050505'
   ctx.fillRect(0, 0, cam.cw, cam.ch)
@@ -523,7 +549,7 @@ function draw() {
   ctx.strokeRect(0, 0, hole.worldW, hole.worldH)
 
   ctx.fillStyle = '#ffffff'
-  for (const tx of [hole.teeBackX, hole.teeForwardX]) ctx.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
+  for (const tx of hole.tees) ctx.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
 
   drawPlatforms('front')
   drawHazards()
@@ -534,6 +560,42 @@ function draw() {
   ctx.fillStyle = '#e44'; ctx.beginPath()
   ctx.moveTo(flagBaseX, flagBaseY - 55); ctx.lineTo(flagBaseX + 24, flagBaseY - 44)
   ctx.lineTo(flagBaseX, flagBaseY - 33); ctx.closePath(); ctx.fill()
+  ctx.restore()
+}
+
+function draw() {
+  const dpr = dprOf()
+
+  // Bake the static world offscreen only when it can have changed (hole/canvas
+  // swap or a visible camera move); otherwise blit the last bitmap. Baking draws
+  // onto the main ctx (helpers target it directly) then captures it.
+  if (staticCanvas.width !== canvas.width || staticCanvas.height !== canvas.height) {
+    staticCanvas.width = canvas.width
+    staticCanvas.height = canvas.height
+    staticDirty = true
+  }
+  if (staticDirty || staticCamMoved()) {
+    drawStaticWorld()
+    staticCtx.setTransform(1, 0, 0, 1, 0, 0)
+    staticCtx.clearRect(0, 0, staticCanvas.width, staticCanvas.height)
+    staticCtx.drawImage(canvas, 0, 0)
+    bakedCamX = cam.camX; bakedCamY = cam.camY; bakedZoom = cam.zoom
+    bakedCW = canvas.width; bakedCH = canvas.height
+    staticDirty = false
+  } else {
+    // Reuse the cached static world (screen-space, backing-store pixels).
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.drawImage(staticCanvas, 0, 0)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  }
+
+  // Dynamic layer shares the same world transform the static bake used.
+  ctx.save()
+  ctx.scale(cam.zoom, cam.zoom)
+  ctx.translate(-cam.camX, -cam.camY)
+  ctx.beginPath()
+  ctx.rect(0, 0, hole.worldW, hole.worldH)
+  ctx.clip()
 
   // Sinking into water: don't fade the ball out — tint it slightly bluer so it
   // reads as underwater while staying clearly visible.
@@ -634,7 +696,7 @@ function draw() {
       swinging: swing.isSwinging(),
       bunkerPct: swing.inBunker ? Math.round(swing.clubBunkerPct()) : null,
       ballFrac: mg.ballFrac, greenLeftFrac: mg.greenLeftFrac, greenRightFrac: mg.greenRightFrac,
-      accPhase: swing.isAccuracyPhase(),
+      powerMarkerFrac: mg.powerMarkerFrac,
       powerPct: swing.lastPowerPct, accuracyPct: swing.lastAccuracyPct,
     })
   } else {

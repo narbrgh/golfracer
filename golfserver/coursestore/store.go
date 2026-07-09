@@ -228,12 +228,8 @@ func hydrateHole(h *terrain.Hole) {
 	if h.HoleX == 0 {
 		h.HoleX = d.HoleX
 	}
-	if h.TeeBackX == 0 {
-		h.TeeBackX = d.TeeBackX
-	}
-	if h.TeeForwardX == 0 {
-		h.TeeForwardX = d.TeeForwardX
-	}
+	// Fold legacy two-tee fields into the Tees list (and default when absent).
+	h.NormalizeTees()
 	if h.ControlPoints == nil {
 		h.ControlPoints = d.ControlPoints
 	}

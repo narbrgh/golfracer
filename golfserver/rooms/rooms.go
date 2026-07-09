@@ -28,9 +28,13 @@ const (
 	StatusFinished Status = "finished"
 )
 
-// defaultMaxPlayers is 2 for now (1v1). Kept generic so a larger free-for-all is
-// a config change rather than a rewrite.
-const defaultMaxPlayers = 2
+// A room holds up to maxOccupants people, of whom at most maxPlayers are active
+// players (each becomes a ball); the rest are spectators. Picking a ball color
+// claims a player slot; choosing spectator frees it.
+const (
+	maxOccupants = 6
+	maxPlayers   = 4
+)
 
 // BallColors are the selectable ball colors. Used to auto-assign a free color on
 // join and to enforce uniqueness within a room. Must match the client palette
@@ -58,16 +62,18 @@ var (
 	ErrBadColor     = errors.New("invalid color")
 	ErrNotReady     = errors.New("everyone must be ready")
 	ErrBadVictory   = errors.New("invalid victory condition")
+	ErrNoPlayerSlot = errors.New("all player slots are taken")
 )
 
 // Player is a connected lobby participant. Send is a buffered outbound queue the
 // transport's writer goroutine drains.
 type Player struct {
-	ID    int
-	Name  string
-	Color string
-	Ready bool
-	Send  chan []byte
+	ID        int
+	Name      string
+	Color     string
+	Ready     bool
+	Spectator bool // watches only; not turned into a ball, excluded from the ready gate
+	Send      chan []byte
 }
 
 type Room struct {
@@ -105,51 +111,70 @@ func (r *Room) summary() Summary {
 
 // PlayerState / RoomState are the lobby snapshot wire shapes.
 type PlayerState struct {
-	ID     int    `json:"id"`
-	Name   string `json:"name"`
-	Color  string `json:"color"`
-	Ready  bool   `json:"ready"`
-	IsHost bool   `json:"isHost"`
+	ID        int    `json:"id"`
+	Name      string `json:"name"`
+	Color     string `json:"color"`
+	Ready     bool   `json:"ready"`
+	IsHost    bool   `json:"isHost"`
+	Spectator bool   `json:"spectator"`
 }
 
 type RoomState struct {
-	ID         string        `json:"id"`
-	Name       string        `json:"name"`
-	HostID     int           `json:"hostId"`
-	Status     Status        `json:"status"`
-	MaxPlayers int           `json:"maxPlayers"`
-	CourseID   string        `json:"courseId"`
-	Victory    string        `json:"victory"`
-	CanStart   bool          `json:"canStart"`
-	Players    []PlayerState `json:"players"`
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	HostID       int           `json:"hostId"`
+	Status       Status        `json:"status"`
+	MaxPlayers   int           `json:"maxPlayers"`   // active-player cap (4)
+	MaxOccupants int           `json:"maxOccupants"` // total people cap (6)
+	PlayerCount  int           `json:"playerCount"`  // current non-spectator members
+	CourseID     string        `json:"courseId"`
+	Victory      string        `json:"victory"`
+	CanStart     bool          `json:"canStart"`
+	Players      []PlayerState `json:"players"`
 }
 
 func (r *Room) state() RoomState {
 	players := make([]PlayerState, 0, len(r.Members))
 	for _, p := range r.Members {
 		players = append(players, PlayerState{
-			ID: p.ID, Name: p.Name, Color: p.Color, Ready: p.Ready, IsHost: p.ID == r.HostID,
+			ID: p.ID, Name: p.Name, Color: p.Color, Ready: p.Ready,
+			IsHost: p.ID == r.HostID, Spectator: p.Spectator,
 		})
 	}
 	sort.Slice(players, func(i, j int) bool { return players[i].ID < players[j].ID })
 	return RoomState{
-		ID: r.ID, Name: r.Name, HostID: r.HostID, Status: r.Status, MaxPlayers: r.MaxPlayers,
+		ID: r.ID, Name: r.Name, HostID: r.HostID, Status: r.Status,
+		MaxPlayers: maxPlayers, MaxOccupants: maxOccupants, PlayerCount: r.playerCount(),
 		CourseID: r.CourseID, Victory: r.Victory, CanStart: r.canStart(), Players: players,
 	}
 }
 
-// canStart is true when every member is ready (colors are already unique by
-// construction). Solo is allowed for now so a host can test flow.
-func (r *Room) canStart() bool {
-	if len(r.Members) == 0 {
-		return false
-	}
+// playerCount is the number of non-spectator members (the balls a match spawns).
+func (r *Room) playerCount() int {
+	n := 0
 	for _, p := range r.Members {
+		if !p.Spectator {
+			n++
+		}
+	}
+	return n
+}
+
+// canStart is true when there's at least one player and every player is ready
+// (spectators are ignored). Colors are already unique by construction. Solo is
+// allowed for now so a host can test flow.
+func (r *Room) canStart() bool {
+	players := 0
+	for _, p := range r.Members {
+		if p.Spectator {
+			continue
+		}
+		players++
 		if !p.Ready {
 			return false
 		}
 	}
-	return true
+	return players > 0
 }
 
 type Manager struct {
@@ -175,7 +200,7 @@ func (m *Manager) CreateAndJoin(p *Player, name string) string {
 	name = trimRoomName(name)
 	id := m.freeIDLocked()
 	r := &Room{
-		ID: id, Name: name, MaxPlayers: defaultMaxPlayers, Status: StatusOpen,
+		ID: id, Name: name, MaxPlayers: maxOccupants, Status: StatusOpen,
 		CreatedAt: time.Now(), HostID: p.ID, Victory: "time", Members: make(map[int]*Player),
 	}
 	m.leaveLocked(p.ID)
@@ -199,12 +224,18 @@ func (m *Manager) Join(p *Player, roomID string) error {
 	if r.Status != StatusOpen {
 		return ErrRoomInGame
 	}
-	if _, already := r.Members[p.ID]; !already && len(r.Members) >= r.MaxPlayers {
+	if _, already := r.Members[p.ID]; !already && len(r.Members) >= maxOccupants {
 		return ErrRoomFull
 	}
 	m.leaveLocked(p.ID)
 	p.Ready = false
-	m.assignColorLocked(r, p)
+	// Join as a player if a slot is free, else as a spectator.
+	p.Spectator = r.playerCount() >= maxPlayers
+	if p.Spectator {
+		p.Color = ""
+	} else {
+		m.assignColorLocked(r, p)
+	}
 	r.Members[p.ID] = p
 	m.playerRoom[p.ID] = roomID
 	return nil
@@ -279,7 +310,42 @@ func (m *Manager) SetColor(playerID int, color string) (string, error) {
 			return "", ErrColorTaken
 		}
 	}
+	// Picking a color claims a player slot: a spectator becomes a player if one is
+	// free (else the choice is rejected so slots aren't overrun).
+	if p.Spectator {
+		if r.playerCount() >= maxPlayers {
+			return "", ErrNoPlayerSlot
+		}
+		p.Spectator = false
+	}
 	p.Color = color
+	return roomID, nil
+}
+
+// SetSpectator toggles a member's spectator role. Becoming a spectator always
+// succeeds and frees a player slot; becoming a player requires a free slot and
+// auto-assigns a color.
+func (m *Manager) SetSpectator(playerID int, spectator bool) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	roomID, r, p, ok := m.memberLocked(playerID)
+	if !ok {
+		return "", ErrNoRoom
+	}
+	if spectator == p.Spectator {
+		return roomID, nil
+	}
+	if spectator {
+		p.Spectator = true
+		p.Ready = false
+		p.Color = ""
+	} else {
+		if r.playerCount() >= maxPlayers {
+			return "", ErrNoPlayerSlot
+		}
+		p.Spectator = false
+		m.assignColorLocked(r, p)
+	}
 	return roomID, nil
 }
 

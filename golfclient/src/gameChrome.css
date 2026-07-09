@@ -354,16 +354,29 @@
   margin-left: -1px;
   background: rgba(255, 255, 255, 0.8);
 }
-/* Green accuracy buffer band — symmetric around the 0 origin, shown during the
-   accuracy sweep. left/width set from JS (track-fraction geometry). */
+/* Green accuracy buffer band — symmetric around the 0 origin, always shown so
+   the aim target is visible. left/width set from JS (track-fraction geometry). */
 .gc-ctl-meter-green {
   position: absolute;
   top: 0; bottom: 0;
   left: 0; width: 0;
   background: rgba(120, 220, 120, 0.45);
+}
+/* Power marker — a ghost ball parked where power was captured, so you can see
+   how hard you hit it during the accuracy sweep. left set from JS. */
+.gc-ctl-meter-marker {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid #000;
+  transform: translate(-50%, -50%);
   display: none;
 }
-.gc-ctl-meter-green.show { display: block; }
+.gc-ctl-meter-marker.show { display: block; }
 .gc-ctl-meter-ball {
   position: absolute;
   top: 50%;

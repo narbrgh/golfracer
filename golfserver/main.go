@@ -173,6 +173,21 @@ func main() {
 	cty := func(x float64) float64 {
 		return terrain.ComputeTerrainY(x, hole, builtSegs, splineCoeffs)
 	}
+	// Single-player uses just two tees: the first (back) and the last (forward) of
+	// the hole's tee list. teeBackX/teeForwardX read the current hole (reassigned
+	// on hole switch), so they always reflect the active hole's tees.
+	teeBackX := func() float64 {
+		if len(hole.Tees) == 0 {
+			return 0
+		}
+		return hole.Tees[0]
+	}
+	teeForwardX := func() float64 {
+		if len(hole.Tees) == 0 {
+			return 0
+		}
+		return hole.Tees[len(hole.Tees)-1]
+	}
 	// computeWaterTraps resolves the course's water hazards into pit geometry.
 	// Each trap floods outward from its anchor (hz.CX) until the terrain rises
 	// above hz.Level, so the pool always conforms to whatever valley it sits in
@@ -287,8 +302,9 @@ func main() {
 			y := cty(teeX) - teeH
 			edges = append(edges, physics.NewEdge(teeX-teeHalfW, y, teeX+teeHalfW, y))
 		}
-		addTee(hole.TeeBackX)
-		addTee(hole.TeeForwardX)
+		for _, teeX := range hole.Tees {
+			addTee(teeX)
+		}
 
 		// No water wall/floor edges: terrain stays solid under every trap, so the
 		// ball can never tunnel through a pit side or fall forever. It rolls down the
@@ -341,8 +357,8 @@ func main() {
 	}
 	rebuildBunkers()
 
-	startY := func() float64 { return cty(hole.TeeBackX) - teeH - 10 }
-	ball := physics.NewBall(hole.TeeBackX, startY(), 10)
+	startY := func() float64 { return cty(teeBackX()) - teeH - 10 }
+	ball := physics.NewBall(teeBackX(), startY(), 10)
 
 	var ballMu sync.Mutex
 	inHoleTicks := 0
@@ -351,7 +367,7 @@ func main() {
 	penaltyFrozen := false // ball locked at penalty spot until next shot
 	penaltyX := 0.0
 	penaltyY := 0.0
-	lastNonWaterX := hole.TeeBackX
+	lastNonWaterX := teeBackX()
 
 	// Bunker state: whether the ball is currently sitting in a bunker, checked
 	// each substep — governs the club penalty applied on the next "shoot".
@@ -427,8 +443,8 @@ func main() {
 		rebuildEdges()
 		inHoleTicks, sinkTicks, inWaterTicks, penaltyFrozen = 0, 0, 0, false
 		inBunker = false
-		ball = physics.NewBall(hole.TeeBackX, startY(), 10)
-		lastNonWaterX = hole.TeeBackX
+		ball = physics.NewBall(teeBackX(), startY(), 10)
+		lastNonWaterX = teeBackX()
 		windMph = physics.RollHoleWindMph()
 	}
 
@@ -458,7 +474,7 @@ func main() {
 				state = ballState{X: ball.X, Y: ball.Y, Resting: true, InHole: true}
 				inHoleTicks--
 				if inHoleTicks == 0 {
-					ball = physics.NewBall(hole.TeeBackX, startY(), 10)
+					ball = physics.NewBall(teeBackX(), startY(), 10)
 					emit(eventMsg{Type: "event", Event: "reset", X: ball.X, Y: ball.Y, Wind: windMph})
 				}
 
@@ -709,9 +725,9 @@ func main() {
 				inWaterTicks = 0
 				penaltyFrozen = false
 				inBunker = false
-				teeX := hole.TeeBackX
+				teeX := teeBackX()
 				if msg.Tee == "forward" {
-					teeX = hole.TeeForwardX
+					teeX = teeForwardX()
 				}
 				ball = physics.NewBall(teeX, cty(teeX)-teeH-10, 10)
 				lastNonWaterX = teeX
@@ -740,7 +756,7 @@ func main() {
 					// below the green, so dropping straight back to physics would re-sink
 					// it (and re-fire the sank event) every tick.
 					inHoleTicks = 0
-					ball = physics.NewBall(hole.TeeBackX, startY(), 10)
+					ball = physics.NewBall(teeBackX(), startY(), 10)
 					skipReset = &eventMsg{Type: "event", Event: "reset", X: ball.X, Y: ball.Y}
 				} else {
 					penaltyFrozen = false
@@ -950,8 +966,9 @@ func main() {
 				Type     string  `json:"type"`
 				Name     string  `json:"name"`
 				RoomID   string  `json:"roomId"`
-				Color    string  `json:"color"`
-				Ready    bool    `json:"ready"`
+				Color     string `json:"color"`
+				Ready     bool   `json:"ready"`
+				Spectator bool   `json:"spectator"`
 				Text     string  `json:"text"`
 				CourseID string  `json:"courseId"`
 				Victory  string  `json:"victory"`
@@ -994,6 +1011,12 @@ func main() {
 				}
 			case "setReady":
 				if roomID, ok := roomMgr.SetReady(pid, msg.Ready); ok {
+					roomMgr.BroadcastState(roomID)
+				}
+			case "setSpectator":
+				if roomID, err := roomMgr.SetSpectator(pid, msg.Spectator); err != nil {
+					sendErr(err)
+				} else {
 					roomMgr.BroadcastState(roomID)
 				}
 			case "setCourse":
