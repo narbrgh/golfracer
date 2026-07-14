@@ -37,7 +37,9 @@ export interface LeaderEntry {
   name: string
   color: string
   totalMs: number
-  holesWon: number
+  matchPts: number
+  totalShots: number
+  holeShots: number
   holeMs: number
   dnf: boolean
 }

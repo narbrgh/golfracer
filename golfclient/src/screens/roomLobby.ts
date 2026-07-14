@@ -16,6 +16,15 @@ export const BALL_COLORS: { id: string; hex: string }[] = [
 ]
 export const colorHex = (id: string) => BALL_COLORS.find((c) => c.id === id)?.hex ?? '#ccc'
 
+// One-line explainer per game mode, shown under the 2x2 grid. Keys must match the
+// server's validVictory values (rooms.go).
+const MODE_DESC: Record<string, string> = {
+  'speed-match': 'Race each hole — fastest to sink wins it. Most rank points across the round takes the match.',
+  'speed-total': 'Lowest total time across every hole wins.',
+  'strokes-match': 'Win each hole with the fewest shots. Most rank points across the round takes the match.',
+  'strokes-total': 'Fewest total shots across every hole wins.',
+}
+
 export interface RoomLobbyHandlers {
   onSetName: (name: string) => void
   onSetColor: (color: string) => void
@@ -46,6 +55,7 @@ export function createRoomLobby(handlers: RoomLobbyHandlers): RoomLobbyScreen {
     colors: HTMLElement
     courses: HTMLElement
     victory: HTMLElement
+    victoryDesc: HTMLElement
     playersLabel: HTMLElement
     players: HTMLElement
     ready: HTMLButtonElement
@@ -115,11 +125,12 @@ export function createRoomLobby(handlers: RoomLobbyHandlers): RoomLobbyScreen {
       }
     }
 
-    // --- victory condition ---
+    // --- game mode (2x2: metric x scope) ---
     for (const btn of Array.from(els.victory.querySelectorAll<HTMLButtonElement>('[data-vic]'))) {
       btn.classList.toggle('selected', btn.dataset.vic === state.victory)
       btn.disabled = !host
     }
+    els.victoryDesc.textContent = MODE_DESC[state.victory] ?? ''
 
     // --- players list ---
     // Spectators show an eye badge and no ready state (and no ball dot); players
@@ -179,11 +190,14 @@ export function createRoomLobby(handlers: RoomLobbyHandlers): RoomLobbyScreen {
                 <div class="course-list" data-courses></div>
               </section>
               <section class="lobby-section">
-                <div class="lobby-label">Victory Condition</div>
-                <div class="chip-row" data-victory>
-                  <button class="chip" type="button" data-vic="time">Total Time</button>
-                  <button class="chip" type="button" data-vic="holes">Holes Won</button>
+                <div class="lobby-label">Game Mode</div>
+                <div class="mode-grid" data-victory>
+                  <button class="mode-btn" type="button" data-vic="speed-match">Speed · Match</button>
+                  <button class="mode-btn" type="button" data-vic="speed-total">Speed · Total</button>
+                  <button class="mode-btn" type="button" data-vic="strokes-match">Strokes · Match</button>
+                  <button class="mode-btn" type="button" data-vic="strokes-total">Strokes · Total</button>
                 </div>
+                <div class="mode-desc" data-victory-desc></div>
               </section>
             </div>
             <div class="lobby-col">
@@ -218,6 +232,7 @@ export function createRoomLobby(handlers: RoomLobbyHandlers): RoomLobbyScreen {
         colors: q('[data-colors]'),
         courses: q('[data-courses]'),
         victory: q('[data-victory]'),
+        victoryDesc: q('[data-victory-desc]'),
         playersLabel: q('[data-players-label]'),
         players: q('[data-players]'),
         ready: q<HTMLButtonElement>('[data-ready]'),

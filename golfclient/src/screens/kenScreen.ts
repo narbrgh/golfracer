@@ -11,7 +11,7 @@
 import './kenScreen.css'
 import type { Screen } from './screenManager'
 import { getPhysicsConfig, setPhysicsConfig, type PhysicsTunables } from '../physicsApi'
-import { CLUB_MAX_SPEED, DEFAULT_CLUB_MAX_SPEED } from '../swing'
+import { CLUB_MAX_SPEED, DEFAULT_CLUB_MAX_SPEED, BACKSPIN_POWER, DEFAULT_BACKSPIN_POWER } from '../swing'
 
 export interface KenScreenHandlers {
   onBack: () => void
@@ -21,6 +21,7 @@ type KenValues = PhysicsTunables & {
   driverDistance: number
   wedgeDistance: number
   putterDistance: number
+  backspinPower: number
 }
 
 interface FieldSpec {
@@ -55,6 +56,8 @@ const PENALTY_FIELDS: FieldSpec[] = [
 const SPIN_FIELDS: FieldSpec[] = [
   { key: 'spinMagnus', label: 'Spin Magnus', description: '1/s — spin turn rate. Higher = topspin dives harder / backspin floats higher (and, with its extra drag, lands SHORTER). Accel = this × speed per spin.', step: 0.05, min: 0, max: 3 },
   { key: 'spinLandingBite', label: 'Spin Landing Bite', description: '0-1 — how much backspin kills (checks up) / topspin boosts forward roll on the landing bounce. 1 = backspin fully stops forward roll.', step: 0.05, min: 0, max: 1 },
+  { key: 'noSpinBackspinFrac', label: 'No-Spin Backspin', description: '0-1 — fraction of the backspin lift/drag/check-up applied to a "no spin" shot, so neutral shots have a slight backspin (the ideal shot). 0 = no-spin is truly neutral.', step: 0.05, min: 0, max: 1 },
+  { key: 'backspinPower', label: 'Backspin Power', description: '0-1 — launch-speed multiplier for backspin shots. Lower = backspin flies shorter (the trade-off for its landing check-up). Client-only, applied at launch.', step: 0.05, min: 0, max: 1 },
 ]
 
 const WIND_FIELDS: FieldSpec[] = [
@@ -71,7 +74,7 @@ const DISTANCE_FIELDS: FieldSpec[] = [
 ]
 
 const ALL_FIELDS = [...SERVER_FIELDS, ...BUNKER_FIELDS, ...PENALTY_FIELDS, ...SPIN_FIELDS, ...WIND_FIELDS, ...DISTANCE_FIELDS]
-const CLIENT_KEYS = new Set<keyof KenValues>(['driverDistance', 'wedgeDistance', 'putterDistance'])
+const CLIENT_KEYS = new Set<keyof KenValues>(['driverDistance', 'wedgeDistance', 'putterDistance', 'backspinPower'])
 
 function toServerTunables(v: KenValues): PhysicsTunables {
   return {
@@ -90,15 +93,19 @@ function toServerTunables(v: KenValues): PhysicsTunables {
     windMphScale: v.windMphScale,
     spinMagnus: v.spinMagnus,
     spinLandingBite: v.spinLandingBite,
+    noSpinBackspinFrac: v.noSpinBackspinFrac,
     windOverrideOn: v.windOverrideOn,
     windOverrideMph: v.windOverrideMph,
   }
 }
 
-function applyClientDistances(v: KenValues) {
+// Applies the client-only knobs (CLIENT_KEYS) to their live module state. These
+// apply instantly with no server round trip, unlike the server tunables.
+function applyClientValues(v: KenValues) {
   CLUB_MAX_SPEED.driver = v.driverDistance
   CLUB_MAX_SPEED.wedge = v.wedgeDistance
   CLUB_MAX_SPEED.putter = v.putterDistance
+  BACKSPIN_POWER.value = v.backspinPower
 }
 
 export function createKenScreen(handlers: KenScreenHandlers): Screen {
@@ -150,7 +157,7 @@ export function createKenScreen(handlers: KenScreenHandlers): Screen {
       if (Number.isNaN(n) || !values) return
       ;(values as Record<keyof KenValues, number>)[spec.key] = n
       syncJsonBox()
-      if (CLIENT_KEYS.has(spec.key)) applyClientDistances(values)
+      if (CLIENT_KEYS.has(spec.key)) applyClientValues(values)
       else pushServerValues()
     })
     row.append(head, desc, input)
@@ -187,12 +194,14 @@ export function createKenScreen(handlers: KenScreenHandlers): Screen {
           driverDistance: CLUB_MAX_SPEED.driver,
           wedgeDistance: CLUB_MAX_SPEED.wedge,
           putterDistance: CLUB_MAX_SPEED.putter,
+          backspinPower: BACKSPIN_POWER.value,
         }
         defaults = {
           ...cfg.defaults,
           driverDistance: DEFAULT_CLUB_MAX_SPEED.driver,
           wedgeDistance: DEFAULT_CLUB_MAX_SPEED.wedge,
           putterDistance: DEFAULT_CLUB_MAX_SPEED.putter,
+          backspinPower: DEFAULT_BACKSPIN_POWER,
         }
         statusEl.textContent = 'Live'
         renderFields()
@@ -203,7 +212,7 @@ export function createKenScreen(handlers: KenScreenHandlers): Screen {
   function resetToDefaults() {
     if (!defaults) return
     values = { ...defaults }
-    applyClientDistances(values)
+    applyClientValues(values)
     pushServerValues()
     renderFields()
   }
@@ -225,7 +234,7 @@ export function createKenScreen(handlers: KenScreenHandlers): Screen {
       }
     }
     values = next
-    applyClientDistances(values)
+    applyClientValues(values)
     pushServerValues()
     renderFields()
     statusEl.textContent = 'Applied pasted values'

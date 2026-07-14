@@ -42,6 +42,67 @@ const (
 	waterBounceKill = 0.0 // upward velocity multiplier while submerged (kills bounce)
 )
 
+// Victory conditions are a 2x2 of metric x scope:
+//
+//	speed-total   lowest total time across the round
+//	speed-match   most rank points, each hole scored by fastest sink time
+//	strokes-total lowest total shots across the round
+//	strokes-match most rank points, each hole scored by fewest shots
+//
+// "match" scope awards per-hole rank points (see holeRankPoints); "total" scope
+// aggregates the raw metric. metricStrokes reports which metric ranks a hole.
+func metricStrokes(victory string) bool { return victory == "strokes-total" || victory == "strokes-match" }
+func scopeMatch(victory string) bool    { return victory == "speed-match" || victory == "strokes-match" }
+
+// holeMetric returns a ball's score for the current hole under the active metric,
+// where lower is better (fewer shots, or fewer ticks to sink).
+func (mt *Match) holeMetric(b *matchBall) uint64 {
+	if metricStrokes(mt.victory) {
+		return uint64(b.holeShots)
+	}
+	return b.finishTick
+}
+
+// holeRankPoints assigns per-hole rank points for Match scope given each ball's
+// hole metric (lower = better). Every member of a tie group receives the points
+// of the LOWEST rank position the group collectively occupies; base position
+// values depend on player count: 2p [1,0]; 3p [3,1,0]; 4p [4,2,1,0].
+func holeRankPoints(metrics []uint64) []int {
+	n := len(metrics)
+	var base []int
+	switch n {
+	case 2:
+		base = []int{1, 0}
+	case 3:
+		base = []int{3, 1, 0}
+	default: // 4+ (game supports up to 4; extra players extend the tail with 0)
+		base = []int{4, 2, 1, 0}
+		for len(base) < n {
+			base = append(base, 0)
+		}
+	}
+	// Order indices by metric ascending (best first).
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool { return metrics[order[i]] < metrics[order[j]] })
+	pts := make([]int, n)
+	for i := 0; i < n; {
+		// Group of equal metrics [i, j).
+		j := i + 1
+		for j < n && metrics[order[j]] == metrics[order[i]] {
+			j++
+		}
+		award := base[j-1] // points of the group's lowest occupied position
+		for k := i; k < j; k++ {
+			pts[order[k]] = award
+		}
+		i = j
+	}
+	return pts
+}
+
 type MatchPhase string
 
 const (
@@ -58,8 +119,10 @@ type matchBall struct {
 	ball       *physics.Ball
 	sunk       bool
 	finishTick uint64 // ticks from hole start to sink; holeCapTicks if DNF
-	totalTicks uint64 // sum of finishTick across holes (victory = time)
-	holesWon   int
+	totalTicks uint64 // sum of finishTick across holes (speed-total metric)
+	holeShots  int    // shots taken on the current hole
+	totalShots int    // sum of holeShots across holes (strokes-total metric)
+	matchPts   int    // rank points accumulated in Match scope (speed-match / strokes-match)
 
 	// Shot cooldown: the owner may only shoot once tick >= shootReadyTick. Set when
 	// the ball settles (shotDelayTicks) or after a water reset (waterPenaltyTicks,
@@ -253,6 +316,7 @@ func (mt *Match) applyShoot(c shootCmd) {
 			vx, vy = vx*k, vy*k
 		}
 		b.ball.Shoot(vx, vy, physics.SpinValue(c.spin), physics.WindVelFromMph(mt.windMph), c.club == "putter")
+		b.holeShots++
 		return
 	}
 }
@@ -287,6 +351,7 @@ func (mt *Match) loadHole(idx int) {
 		b.ball = physics.NewBall(x, y, matchBallRadius)
 		b.sunk = false
 		b.finishTick = 0
+		b.holeShots = 0
 		// Immediately shootable at hole start (the countdown was the pause).
 		b.shootReadyTick = 0
 		b.penaltyPending = false
@@ -298,9 +363,9 @@ func (mt *Match) loadHole(idx int) {
 
 // rankedBalls returns the balls ordered best-standings first, for tee assignment.
 // The previous hole's winner is forced to rank 1 (mirrors the old winner-starts-
-// back rule). The rest are ordered by the match victory condition: fewest total
-// ticks for "time", most holes won for "holes". Before any hole completes this is
-// just the balls' natural (join) order.
+// back rule). The rest are ordered by the victory condition: most match points
+// for Match scope, else fewest total shots (strokes) or fewest total ticks
+// (speed). Before any hole completes this is just the balls' natural (join) order.
 func (mt *Match) rankedBalls() []*matchBall {
 	ranked := make([]*matchBall, len(mt.balls))
 	copy(ranked, mt.balls)
@@ -314,9 +379,13 @@ func (mt *Match) rankedBalls() []*matchBall {
 				return false
 			}
 		}
-		if mt.victory == "holes" {
-			if a.holesWon != b.holesWon {
-				return a.holesWon > b.holesWon
+		if scopeMatch(mt.victory) {
+			if a.matchPts != b.matchPts {
+				return a.matchPts > b.matchPts
+			}
+		} else if metricStrokes(mt.victory) {
+			if a.totalShots != b.totalShots {
+				return a.totalShots < b.totalShots
 			}
 		}
 		return a.totalTicks < b.totalTicks
@@ -497,23 +566,37 @@ func (mt *Match) finishHole() {
 			b.finishTick = holeCapTicks
 		}
 	}
-	// Hole winner = unique fastest.
+	// Hole winner = unique best under the active metric (fewest ticks or shots).
+	// This sets who tees back next hole regardless of scope.
 	best := uint64(math.MaxUint64)
 	var winner *matchBall
 	tie := false
 	for _, b := range mt.balls {
-		if b.finishTick < best {
-			best, winner, tie = b.finishTick, b, false
-		} else if b.finishTick == best {
+		m := mt.holeMetric(b)
+		if m < best {
+			best, winner, tie = m, b, false
+		} else if m == best {
 			tie = true
 		}
 	}
 	if winner != nil && !tie {
-		winner.holesWon++
 		mt.lastWinnerID = winner.playerID // takes the back tee next hole
 	}
+
+	// Match scope: award per-hole rank points to every ball (tie-aware).
+	if scopeMatch(mt.victory) {
+		metrics := make([]uint64, len(mt.balls))
+		for i, b := range mt.balls {
+			metrics[i] = mt.holeMetric(b)
+		}
+		for i, p := range holeRankPoints(metrics) {
+			mt.balls[i].matchPts += p
+		}
+	}
+
 	for _, b := range mt.balls {
 		b.totalTicks += b.finishTick
+		b.totalShots += b.holeShots
 	}
 
 	last := mt.holeIdx == len(mt.holes)-1
@@ -557,7 +640,7 @@ func (mt *Match) broadcastState() {
 			"playerId": b.playerID, "x": x, "y": y,
 			"color": b.color, "resting": resting, "sunk": b.sunk,
 			"readyInMs": readyInMs, "penalty": b.penaltyPending,
-			"inWater": b.sinkTicksLeft > 0,
+			"inWater": b.sinkTicksLeft > 0, "shots": b.holeShots,
 		})
 	}
 	msLeft := 0
@@ -587,7 +670,8 @@ func (mt *Match) broadcastLeaderboard(final bool) {
 	for _, b := range mt.balls {
 		entries = append(entries, map[string]any{
 			"playerId": b.playerID, "name": b.name, "color": b.color,
-			"totalMs": ticksToMs(b.totalTicks), "holesWon": b.holesWon,
+			"totalMs": ticksToMs(b.totalTicks), "matchPts": b.matchPts,
+			"totalShots": b.totalShots, "holeShots": b.holeShots,
 			"holeMs": ticksToMs(b.finishTick), "dnf": b.finishTick >= holeCapTicks,
 		})
 	}

@@ -81,9 +81,23 @@ export function putterRollDistance(powerPct = 100): number {
 export const AIR_DRAG = 0.22
 export const SPIN_MAGNUS = 0.30
 export const WIND_MPH_SCALE = 55.0
+// Mirrors golfserver NoSpinBackspinFrac — a "no spin" shot gets this fraction of the
+// backspin lift/drag (and, server-side, check-up). Like SPIN_MAGNUS above, this is a
+// static mirror for the preview; if the Ken menu tunes the server copy the preview
+// may drift slightly, exactly as it would for the other air constants.
+export const NO_SPIN_BACKSPIN_FRAC = 0.25
 // Mirrors golfserver ball.go backspinExtraDrag — extra horizontal drag on backspun
 // shots so they carry shorter than no-spin. Keep equal to the server constant.
 export const BACKSPIN_EXTRA_DRAG = 0.6
+
+// Backspin launch-power multiplier — a backspin shot fires at this fraction of the
+// club's speed, so it flies genuinely SHORTER while keeping its landing check-up
+// (the real trade-off). Applied client-side at launch (the server receives the
+// already-reduced velocity and stays authoritative on it), so this is a client-only
+// Ken knob like CLUB_MAX_SPEED. Held in a mutable object so the Ken menu can tune it
+// live. Preview + multiplayer prediction inherit the reduced velocity automatically.
+export const DEFAULT_BACKSPIN_POWER = 0.8
+export const BACKSPIN_POWER = { value: DEFAULT_BACKSPIN_POWER }
 
 /** spin string → sign used by the Magnus term: back −1, top +1, else 0. */
 export function spinSign(spin: Spin): number { return spin === 'back' ? -1 : spin === 'top' ? 1 : 0 }
@@ -95,13 +109,13 @@ export function spinSign(spin: Spin): number { return spin === 'back' ? -1 : spi
  * −1/0/+1. Shared by the preview parabola and the multiplayer prediction loop so
  * both track the server. Ground/roll physics is not modeled here (preview only).
  */
-export function airStep(vx: number, vy: number, dt: number, windVel: number, spin: number): { vx: number; vy: number } {
+export function airStep(vx: number, vy: number, dt: number, windVel: number, spin: number, noSpinFrac = 0): { vx: number; vy: number } {
   vy += GRAVITY * dt
   if (AIR_DRAG > 0) {
     vx += -AIR_DRAG * (vx - windVel) * dt
     vy += -AIR_DRAG * vy * dt
   }
-  if (spin !== 0 && SPIN_MAGNUS > 0) {
+  if (SPIN_MAGNUS > 0 && (spin !== 0 || noSpinFrac > 0)) {
     const speed = Math.hypot(vx, vy)
     if (speed > 1) {
       if (spin > 0) {
@@ -112,11 +126,14 @@ export function airStep(vx: number, vy: number, dt: number, windVel: number, spi
         vx += px * mag
         vy += py * mag
       } else {
-        // Backspin: lift only + extra horizontal drag → higher, steeper, shorter.
-        // Mirrors golfserver ball.go. (Landing bite is server-only, not previewed.)
-        const lift = SPIN_MAGNUS * speed * dt
+        // Backspin (spin<0): lift only + extra horizontal drag → higher, steeper,
+        // shorter. No-spin (spin===0) gets the same, scaled by noSpinFrac, so a
+        // "no spin" shot has a slight backspin. Mirrors golfserver ball.go.
+        // (Landing bite is server-only, not previewed.)
+        const frac = spin < 0 ? 1 : noSpinFrac
+        const lift = frac * SPIN_MAGNUS * speed * dt
         vy -= lift
-        vx += -BACKSPIN_EXTRA_DRAG * AIR_DRAG * (vx - windVel) * dt
+        vx += -frac * BACKSPIN_EXTRA_DRAG * AIR_DRAG * (vx - windVel) * dt
       }
     }
   }
@@ -603,8 +620,11 @@ export class SwingEngine {
 
     // Preview at max power, reduced by the bunker penalty when applicable so the
     // arc visibly shrinks when the ball sits in sand (matches the actual shot).
+    // Backspin fires at reduced power (BACKSPIN_POWER) too — mirror it so the preview
+    // arc shrinks to match the real shorter shot (see getLaunchVelocity).
     let speed = CLUB_MAX_SPEED[this.club]
     if (this.inBunker) speed *= CLUB_BUNKER_PENALTY[this.club]
+    if (this.spin === 'back') speed *= BACKSPIN_POWER.value
     let vx = Math.cos(this.aimAngle) * speed, vy = Math.sin(this.aimAngle) * speed
     let x = ballWx, y = ballWy
     const spin = spinSign(this.spin)
@@ -612,7 +632,7 @@ export class SwingEngine {
     const dt = 1 / 60
     let wentUp = false
     for (let i = 1; i <= 600; i++) {
-      ;({ vx, vy } = airStep(vx, vy, dt, this.windVel, spin))
+      ;({ vx, vy } = airStep(vx, vy, dt, this.windVel, spin, NO_SPIN_BACKSPIN_FRAC))
       x += vx * dt
       y += vy * dt
       if (y < ballWy) wentUp = true
@@ -839,6 +859,10 @@ export class SwingEngine {
     // re-applies it authoritatively from its own bunker check, so a spoofed
     // client can't dodge it — this is prediction fidelity, not the enforcement.
     if (this.inBunker) speed *= CLUB_BUNKER_PENALTY[this.club]
+    // Backspin fires at reduced power so it flies shorter (the trade-off for its
+    // landing check-up). This reduced velocity is what's sent to the server, so the
+    // server stays authoritative on it and multiplayer prediction inherits it.
+    if (this.spin === 'back') speed *= BACKSPIN_POWER.value
     return { vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed }
   }
 

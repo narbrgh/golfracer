@@ -50,7 +50,11 @@ func validColor(c string) bool {
 	return false
 }
 
-var validVictory = map[string]bool{"time": true, "holes": true}
+// Victory = metric (speed|strokes) x scope (total|match). See match.go.
+var validVictory = map[string]bool{
+	"speed-total": true, "speed-match": true,
+	"strokes-total": true, "strokes-match": true,
+}
 
 var (
 	ErrNoRoom       = errors.New("join a room first")
@@ -201,7 +205,7 @@ func (m *Manager) CreateAndJoin(p *Player, name string) string {
 	id := m.freeIDLocked()
 	r := &Room{
 		ID: id, Name: name, MaxPlayers: maxOccupants, Status: StatusOpen,
-		CreatedAt: time.Now(), HostID: p.ID, Victory: "time", Members: make(map[int]*Player),
+		CreatedAt: time.Now(), HostID: p.ID, Victory: "speed-total", Members: make(map[int]*Player),
 	}
 	m.leaveLocked(p.ID)
 	p.Ready = false

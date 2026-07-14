@@ -24,6 +24,7 @@ export interface PhysicsTunables {
   windMphScale: number
   spinMagnus: number
   spinLandingBite: number
+  noSpinBackspinFrac: number
   windOverrideOn: number
   windOverrideMph: number
 }

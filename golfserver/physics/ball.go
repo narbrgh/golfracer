@@ -61,12 +61,13 @@ type Tunables struct {
 	PutterPenalty      float64 `json:"putterPenalty"`      // shot-power multiplier when hitting a putter out of a bunker
 
 	// --- Air / spin (wind, topspin, backspin) ---
-	AirDrag         float64 `json:"airDrag"`         // 1/s — air-drag coefficient; force = -AirDrag*(v - airVel). 0 = no drag.
-	WindMphScale    float64 `json:"windMphScale"`    // px/s of air velocity per 1 mph of wind (mph is a display label)
-	SpinMagnus      float64 `json:"spinMagnus"`      // 1/s — Magnus turn rate: perpendicular accel = SpinMagnus*speed per spin unit
-	SpinLandingBite float64 `json:"spinLandingBite"` // 0-1 — how much backspin kills / topspin boosts forward speed on the landing bounce
-	WindOverrideOn  float64 `json:"windOverrideOn"`  // 0/1 — when 1, every hole uses WindOverrideMph instead of a random wind
-	WindOverrideMph float64 `json:"windOverrideMph"` // forced wind in mph (+right / -left) when WindOverrideOn is 1
+	AirDrag            float64 `json:"airDrag"`            // 1/s — air-drag coefficient; force = -AirDrag*(v - airVel). 0 = no drag.
+	WindMphScale       float64 `json:"windMphScale"`       // px/s of air velocity per 1 mph of wind (mph is a display label)
+	SpinMagnus         float64 `json:"spinMagnus"`         // 1/s — Magnus turn rate: perpendicular accel = SpinMagnus*speed per spin unit
+	SpinLandingBite    float64 `json:"spinLandingBite"`    // 0-1 — how much backspin kills / topspin boosts forward speed on the landing bounce
+	NoSpinBackspinFrac float64 `json:"noSpinBackspinFrac"` // 0-1 — fraction of backspin lift/drag/check-up applied to a "no spin" shot (a slight backspin = the ideal shot)
+	WindOverrideOn     float64 `json:"windOverrideOn"`     // 0/1 — when 1, every hole uses WindOverrideMph instead of a random wind
+	WindOverrideMph    float64 `json:"windOverrideMph"`    // forced wind in mph (+right / -left) when WindOverrideOn is 1
 }
 
 // DefaultTunables returns the game's original hardcoded tuning, used both as
@@ -88,12 +89,13 @@ func DefaultTunables() Tunables {
 		// Air/spin defaults. Wind is the stronger effect (higher AirDrag +
 		// WindMphScale so it pushes the ball noticeably); spin is subtler (lower
 		// Magnus + landing bite) — it shapes the arc and landing without dominating.
-		AirDrag:         0.22,
-		WindMphScale:    55.0,
-		SpinMagnus:      0.30,
-		SpinLandingBite: 0.30,
-		WindOverrideOn:  0,
-		WindOverrideMph: 0,
+		AirDrag:            0.22,
+		WindMphScale:       55.0,
+		SpinMagnus:         0.30,
+		SpinLandingBite:    0.30,
+		NoSpinBackspinFrac: 0.25,
+		WindOverrideOn:     0,
+		WindOverrideMph:    0,
 	}
 }
 
@@ -157,7 +159,9 @@ const (
 	// backspinExtraDrag scales AirDrag as extra horizontal decel on backspun shots
 	// only, so backspin lands SHORTER than no-spin (it trades carry for check-up).
 	// Fixed identity constant, not a live-tunable feel knob. Mirrored client-side in
-	// swing.ts BACKSPIN_EXTRA_DRAG — keep the two equal.
+	// swing.ts BACKSPIN_EXTRA_DRAG — keep the two equal. This shapes the arc / carry;
+	// the client-side backspin power multiplier (swing.ts BACKSPIN_POWER) stacks on top
+	// as the primary in-game distance penalty (this test's Shoot() path bypasses it).
 	backspinExtraDrag = 0.6
 )
 
@@ -369,7 +373,7 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 		// mostly-horizontal shot this lifts a backspun ball (Spin=-1) and pushes a
 		// topspun ball (Spin=+1) down; rotating the velocity vector keeps it correct
 		// on steep/downward shots too.
-		if b.Spin != 0 && Current.SpinMagnus > 0 {
+		if Current.SpinMagnus > 0 && (b.Spin != 0 || Current.NoSpinBackspinFrac > 0) {
 			speed := math.Hypot(b.VX, b.VY)
 			if speed > 1 {
 				if b.Spin > 0 {
@@ -381,14 +385,20 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 					b.VX += px * mag
 					b.VY += py * mag
 				} else {
-					// Backspin: LIFT ONLY (no free forward carry) plus a little extra
-					// horizontal drag, so it flies higher/steeper and lands SHORTER than
-					// no-spin — trading distance for the landing check-up (the landing
+					// Backspin (Spin<0): LIFT ONLY (no free forward carry) plus a little
+					// extra horizontal drag, so it flies higher/steeper and lands SHORTER
+					// than no-spin — trading distance for the landing check-up (the landing
 					// bite below). `lift` matches the magnitude of the old perpendicular
 					// push, applied straight up (-Y) at any flight angle.
-					lift := Current.SpinMagnus * speed * dt
+					// No-spin (Spin==0) gets the SAME effect scaled by NoSpinBackspinFrac,
+					// so a "no spin" shot has a slight backspin — the ideal shot.
+					frac := 1.0
+					if b.Spin == 0 {
+						frac = Current.NoSpinBackspinFrac
+					}
+					lift := frac * Current.SpinMagnus * speed * dt
 					b.VY -= lift
-					b.VX += -backspinExtraDrag * Current.AirDrag * (b.VX - b.WindVel) * dt
+					b.VX += -frac * backspinExtraDrag * Current.AirDrag * (b.VX - b.WindVel) * dt
 				}
 			}
 		}
@@ -496,15 +506,21 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 			// backspin removes it (the ball "checks up"). The adjustment is scaled by
 			// the current forward speed, so it can shorten a fast roll to a stop but
 			// never reverse it or accelerate it past its landing speed.
-			if b.airTicks > 0 && b.Spin != 0 {
+			if b.airTicks > 0 && (b.Spin != 0 || Current.NoSpinBackspinFrac > 0) {
 				// Signed forward direction along the surface = sign of vt (the ball's
 				// own tangential travel). Adjust magnitude toward/away from forward.
 				fwd := 1.0
 				if vt < 0 {
 					fwd = -1.0
 				}
+				// Bite coefficient: spun shots use ±SpinLandingBite; a no-spin shot gets a
+				// slight check-up scaled by NoSpinBackspinFrac (negative = removes roll).
+				bite := float64(b.Spin) * Current.SpinLandingBite
+				if b.Spin == 0 {
+					bite = -Current.NoSpinBackspinFrac * Current.SpinLandingBite
+				}
 				mag := math.Abs(vt)
-				mag += float64(b.Spin) * Current.SpinLandingBite * mag
+				mag += bite * mag
 				if mag < 0 {
 					mag = 0 // backspin bite can stop the roll, not reverse it
 				}

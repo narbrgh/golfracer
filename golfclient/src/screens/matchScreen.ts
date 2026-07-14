@@ -6,7 +6,7 @@ import type { Hole, BuiltSegment, SplineCoeff } from '../terrain'
 import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs, normalizeTees } from '../terrain'
 import { colorHex } from './roomLobby'
 import { GameCamera, mountGameChrome } from '../gameCamera'
-import { SwingEngine, formatDistance, airStep, WIND_MPH_SCALE } from '../swing'
+import { SwingEngine, formatDistance, airStep, WIND_MPH_SCALE, NO_SPIN_BACKSPIN_FRAC } from '../swing'
 
 // The rendered canvas grows to fill the window but never shrinks below this — the
 // old fixed size, which reads well as a floor.
@@ -527,7 +527,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     if (predActive) {
       // Mirror the server's airborne physics (gravity + wind drag + spin Magnus)
       // so the local prediction tracks the authoritative ball.
-      ;({ vx: predVX, vy: predVY } = airStep(predVX, predVY, dt, windMph * WIND_MPH_SCALE, predSpin))
+      ;({ vx: predVX, vy: predVY } = airStep(predVX, predVY, dt, windMph * WIND_MPH_SCALE, predSpin, NO_SPIN_BACKSPIN_FRAC))
       predX += predVX * dt
       predY += predVY * dt
       if (myId != null) render.set(myId, { x: predX, y: predY })
@@ -760,25 +760,38 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     },
     setLeaderboard(m) {
       const title = m.final ? 'Final Results' : `Hole ${m.holeIndex + 1} of ${m.holeCount}`
+      // Victory = metric (speed|strokes) x scope (total|match). Match scope ranks
+      // by rank points; total scope ranks by the raw aggregate. See match.go.
+      const strokes = m.victory === 'strokes-total' || m.victory === 'strokes-match'
+      const isMatch = m.victory === 'speed-match' || m.victory === 'strokes-match'
+      const totalLabel = isMatch ? 'Points' : strokes ? 'Shots' : 'Total'
+      const totalCell = (e: typeof m.entries[number]) =>
+        isMatch ? `${e.matchPts} pts` : strokes ? `${e.totalShots}` : `${(e.totalMs / 1000).toFixed(1)}s`
+      const holeCellOf = (e: typeof m.entries[number]) =>
+        e.dnf ? 'DNF' : strokes ? `${e.holeShots}` : `${(e.holeMs / 1000).toFixed(1)}s`
+      // Sort: primary by scope metric, tiebreak by the raw aggregate (lower time / fewer shots).
+      const sortKey = isMatch
+        ? (a: typeof m.entries[number], b: typeof m.entries[number]) => b.matchPts - a.matchPts || (strokes ? a.totalShots - b.totalShots : a.totalMs - b.totalMs)
+        : strokes
+          ? (a: typeof m.entries[number], b: typeof m.entries[number]) => a.totalShots - b.totalShots || a.totalMs - b.totalMs
+          : (a: typeof m.entries[number], b: typeof m.entries[number]) => a.totalMs - b.totalMs
       const rows = m.entries
         .slice()
-        .sort((a, b) => (m.victory === 'holes' ? b.holesWon - a.holesWon || a.totalMs - b.totalMs : a.totalMs - b.totalMs))
+        .sort(sortKey)
         .map((e, i) => {
-          const metric = m.victory === 'holes' ? `${e.holesWon} holes` : `${(e.totalMs / 1000).toFixed(1)}s`
-          const holeCell = e.dnf ? 'DNF' : `${(e.holeMs / 1000).toFixed(1)}s`
           return `<div class="mb-row">
             <span class="mb-rank">${i + 1}</span>
             <span class="mb-dot" style="background:${colorHex(e.color)}"></span>
             <span class="mb-name">${escapeHtml(e.name)}</span>
-            <span class="mb-hole">${holeCell}</span>
-            <span class="mb-total">${metric}</span>
+            <span class="mb-hole">${holeCellOf(e)}</span>
+            <span class="mb-total">${totalCell(e)}</span>
           </div>`
         })
         .join('')
       boardEl.innerHTML = `
         <div class="mb-card">
           <h2 class="mb-title">${title}</h2>
-          <div class="mb-head"><span class="mb-rank"></span><span class="mb-dot"></span><span class="mb-name"></span><span class="mb-hole">This hole</span><span class="mb-total">${m.victory === 'holes' ? 'Won' : 'Total'}</span></div>
+          <div class="mb-head"><span class="mb-rank"></span><span class="mb-dot"></span><span class="mb-name"></span><span class="mb-hole">This hole</span><span class="mb-total">${totalLabel}</span></div>
           ${rows}
           ${m.final ? '<button class="mb-return" type="button">Back to Lobby</button>' : '<div class="mb-next">Next hole starting…</div>'}
         </div>`

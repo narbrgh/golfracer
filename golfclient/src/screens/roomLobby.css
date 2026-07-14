@@ -162,6 +162,38 @@
 }
 .chip:disabled { opacity: 0.55; cursor: default; }
 
+/* ---- Game mode (2x2 grid + description) ---- */
+.mode-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.mode-btn {
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(36, 64, 90, 0.25);
+  background: #fff;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+}
+.mode-btn:hover:not(:disabled) { background: rgba(36, 64, 90, 0.06); }
+.mode-btn.selected {
+  background: var(--sea-3);
+  border-color: var(--sea-3);
+  color: var(--cream);
+}
+.mode-btn:disabled { opacity: 0.55; cursor: default; }
+.mode-desc {
+  margin-top: 8px;
+  min-height: 2.4em;
+  font-size: 13px;
+  line-height: 1.3;
+  color: rgba(36, 64, 90, 0.75);
+}
+
 /* ---- Players ---- */
 .players-list { display: flex; flex-direction: column; gap: 8px; }
 .player-row {
