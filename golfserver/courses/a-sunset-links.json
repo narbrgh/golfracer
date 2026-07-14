@@ -9,8 +9,10 @@
       "worldW": 5200,
       "worldH": 1450,
       "baseGround": 900,
-      "teeBackX": 200,
-      "teeForwardX": 400,
+      "tees": [
+        200,
+        400
+      ],
       "holeX": 4725,
       "useSpline": true,
       "controlPoints": [
@@ -155,8 +157,10 @@
       "worldW": 3600,
       "worldH": 1998,
       "baseGround": 900,
-      "teeBackX": 200,
-      "teeForwardX": 400,
+      "tees": [
+        200,
+        400
+      ],
       "holeX": 3300,
       "useSpline": true,
       "controlPoints": [
@@ -244,8 +248,10 @@
       "worldW": 7000,
       "worldH": 1645,
       "baseGround": 900,
-      "teeBackX": 200,
-      "teeForwardX": 400,
+      "tees": [
+        200,
+        400
+      ],
       "holeX": 6700,
       "useSpline": true,
       "controlPoints": [
@@ -368,8 +374,10 @@
       "worldW": 6900,
       "worldH": 1918,
       "baseGround": 900,
-      "teeBackX": 200,
-      "teeForwardX": 400,
+      "tees": [
+        200,
+        400
+      ],
       "holeX": 5950,
       "useSpline": true,
       "controlPoints": [
@@ -534,8 +542,10 @@
       "worldW": 8000,
       "worldH": 3650,
       "baseGround": 2380,
-      "teeBackX": 200,
-      "teeForwardX": 400,
+      "tees": [
+        200,
+        400
+      ],
       "holeX": 6375,
       "useSpline": true,
       "controlPoints": [
@@ -732,8 +742,10 @@
       "worldW": 5600,
       "worldH": 1887,
       "baseGround": 900,
-      "teeBackX": 200,
-      "teeForwardX": 400,
+      "tees": [
+        200,
+        400
+      ],
       "holeX": 4925,
       "useSpline": true,
       "controlPoints": [
@@ -860,8 +872,10 @@
       "worldW": 3800,
       "worldH": 1450,
       "baseGround": 900,
-      "teeBackX": 200,
-      "teeForwardX": 400,
+      "tees": [
+        200,
+        400
+      ],
       "holeX": 3500,
       "useSpline": true,
       "controlPoints": [
@@ -949,8 +963,10 @@
       "worldW": 7400,
       "worldH": 1805,
       "baseGround": 900,
-      "teeBackX": 200,
-      "teeForwardX": 400,
+      "tees": [
+        200,
+        400
+      ],
       "holeX": 7100,
       "useSpline": true,
       "controlPoints": [
@@ -967,8 +983,16 @@
           "y": 772
         },
         {
-          "x": 2000,
-          "y": 836
+          "x": 1964,
+          "y": 830.5625
+        },
+        {
+          "x": 2148,
+          "y": 892.5625
+        },
+        {
+          "x": 2432,
+          "y": 903.5625
         },
         {
           "x": 2800,
@@ -983,8 +1007,16 @@
           "y": 1348
         },
         {
-          "x": 4800,
-          "y": 804
+          "x": 4636.75,
+          "y": 909.9375
+        },
+        {
+          "x": 4913.75,
+          "y": 912.9375
+        },
+        {
+          "x": 5209.75,
+          "y": 778.9375
         },
         {
           "x": 5600,
@@ -1036,7 +1068,39 @@
         }
       ],
       "bunkers": [],
-      "platforms": [],
+      "platforms": [
+        {
+          "points": [
+            {
+              "x": 2907.25,
+              "y": 903.0625
+            },
+            {
+              "x": 3070.25,
+              "y": 935.0625
+            },
+            {
+              "x": 3458.25,
+              "y": 925.0625
+            },
+            {
+              "x": 3576.25,
+              "y": 897.0625
+            },
+            {
+              "x": 3502.25,
+              "y": 986.0625
+            },
+            {
+              "x": 2992.75,
+              "y": 989.8125
+            }
+          ],
+          "zOrder": "front",
+          "fillColor": "#f5d800",
+          "edgeColor": "#b8a000"
+        }
+      ],
       "theme": {
         "skyTop": "#bfe3f2",
         "skyBottom": "#ff9e5e",
@@ -1062,8 +1126,10 @@
       "worldW": 8050,
       "worldH": 2141,
       "baseGround": 900,
-      "teeBackX": 200,
-      "teeForwardX": 400,
+      "tees": [
+        200,
+        400
+      ],
       "holeX": 7500,
       "useSpline": true,
       "controlPoints": [
