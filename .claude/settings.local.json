@@ -42,7 +42,8 @@
       "Bash(ssh -i ~/.ssh/BotKey02.pem -o ConnectTimeout=10 ubuntu@18.119.220.87 'echo \"running binary mtime:\"; stat -c \"%y %n\" /home/ubuntu/golf-server; echo \"service started:\"; systemctl show golf -p ActiveEnterTimestamp --value')",
       "Bash(node_modules/.bin/tsc --noEmit)",
       "Bash(echo \"TSC: $?\")",
-      "Bash(node_modules/.bin/vite build *)"
+      "Bash(node_modules/.bin/vite build *)",
+      "Bash(python3 /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/5f36765d-cbf2-433d-98fc-5d87d0b78bd2/scratchpad/gen_moonshot.py)"
     ]
   }
 }

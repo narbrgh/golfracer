@@ -21,7 +21,9 @@ import (
 const (
 	matchTickRate     = time.Second / 60
 	countdownTicks    = 3 * 60
-	holeCapTicks      = 180 * 60 // per-hole time cap (3 min); unsunk at the cap is a DNF — the full 3 min is added to the player's total (see finishHole)
+	holeCapTicks      = 180 * 60 // speed-mode per-hole time cap (3 min); unsunk at the cap is a DNF — the full 3 min is added to the player's total (see finishHole)
+	idleCapTicks      = 120 * 60 // strokes-mode per-player idle cap (2 min since last hit); resets on each shot, DNFs the player if it elapses
+	idleWarnTicks     = 60 * 60  // last 60s of the idle cap: the client shows a red center-left countdown
 	intermissionCapTicks = 10 * 60 // once someone clicks OK, everyone gets at most 10s before auto-advance
 	resultsTicks      = 25 * 60 // auto-return to lobby if the host never clicks
 	matchBallRadius   = 10.0
@@ -53,6 +55,15 @@ const (
 // aggregates the raw metric. metricStrokes reports which metric ranks a hole.
 func metricStrokes(victory string) bool { return victory == "strokes-total" || victory == "strokes-match" }
 func scopeMatch(victory string) bool    { return victory == "speed-match" || victory == "strokes-match" }
+
+// ballDNF reports whether a ball did-not-finish the current hole: an idle timeout
+// in strokes modes, or hitting the 3-min hole cap unsunk in speed modes.
+func (mt *Match) ballDNF(b *matchBall) bool {
+	if metricStrokes(mt.victory) {
+		return b.dnfIdle
+	}
+	return b.finishTick >= holeCapTicks
+}
 
 // holeMetric returns a ball's score for the current hole under the active metric,
 // where lower is better (fewer shots, or fewer ticks to sink).
@@ -125,6 +136,12 @@ type matchBall struct {
 	matchPts   int    // rank points accumulated in Match scope (speed-match / strokes-match)
 	history    []holeResult // per-hole record, appended in finishHole (index = hole idx)
 	readied    bool         // clicked OK on the current intermission scorecard
+
+	// Strokes-mode idle cap: idleDeadline is the tick this ball DNFs if its owner
+	// hasn't hit by then. Set to holeStart+idleCapTicks at hole load and pushed
+	// forward on every shot. dnfIdle marks a ball already timed out this hole.
+	idleDeadline uint64
+	dnfIdle      bool
 
 	// Shot cooldown: the owner may only shoot once tick >= shootReadyTick. Set when
 	// the ball settles (shotDelayTicks) or after a water reset (waterPenaltyTicks,
@@ -237,8 +254,7 @@ func (mt *Match) step() bool {
 	switch mt.phase {
 	case PhaseCountdown:
 		if mt.tick >= mt.phaseEnds {
-			mt.phase = PhasePlaying
-			mt.holeStart = mt.tick
+			mt.startPlaying()
 		}
 	case PhasePlaying:
 		mt.simulate()
@@ -257,8 +273,7 @@ func (mt *Match) step() bool {
 		}
 		capHit := mt.interCap != 0 && mt.tick >= mt.interCap
 		if allReady || capHit {
-			mt.phase = PhasePlaying
-			mt.holeStart = mt.tick
+			mt.startPlaying()
 		}
 	case PhaseResults:
 		if mt.tick >= mt.phaseEnds {
@@ -285,6 +300,10 @@ func (mt *Match) step() bool {
 	if mt.phase == PhasePlaying {
 		if anyMoving || mt.prevAnyMoving {
 			doBroadcast = true
+		} else if mt.tick%6 == 0 && mt.anyIdleWarning() {
+			// At rest but a strokes-mode idle countdown is live: send a low-rate
+			// tick so the client's red DNF countdown keeps ticking down.
+			doBroadcast = true
 		}
 	} else if mt.tick%6 == 0 {
 		doBroadcast = true
@@ -294,6 +313,21 @@ func (mt *Match) step() bool {
 		mt.broadcastState()
 	}
 	return true
+}
+
+// anyIdleWarning reports whether any un-sunk ball is inside its strokes-mode idle
+// warn window — used to keep broadcasting (past rest-silence) so the client's red
+// DNF countdown animates.
+func (mt *Match) anyIdleWarning() bool {
+	if !metricStrokes(mt.victory) {
+		return false
+	}
+	for _, b := range mt.balls {
+		if !b.sunk && !b.dnfIdle && b.idleDeadline > mt.tick && b.idleDeadline-mt.tick <= idleWarnTicks {
+			return true
+		}
+	}
+	return false
 }
 
 // ballInBunker reports whether world-x sits over a bunker (the sand rim there is
@@ -316,7 +350,7 @@ func (mt *Match) applyShoot(c shootCmd) {
 		return
 	}
 	for _, b := range mt.balls {
-		if b.playerID != c.playerID || b.sunk || b.ball == nil || !b.ball.Resting || mt.tick < b.shootReadyTick {
+		if b.playerID != c.playerID || b.sunk || b.dnfIdle || b.ball == nil || !b.ball.Resting || mt.tick < b.shootReadyTick {
 			continue
 		}
 		vx, vy := c.vx, c.vy
@@ -343,6 +377,7 @@ func (mt *Match) applyShoot(c shootCmd) {
 		}
 		b.ball.Shoot(vx, vy, physics.SpinValue(c.spin), physics.WindVelFromMph(mt.windMph), c.club == "putter")
 		b.holeShots++
+		b.idleDeadline = mt.tick + idleCapTicks // reset the strokes-mode idle cap on each hit
 		return
 	}
 }
@@ -365,6 +400,30 @@ func (mt *Match) applyReady(playerID int) {
 	}
 }
 
+// selectTees picks which of a hole's tees to use for n players. The back tee
+// (index 0) is always included, then the front-most tees fill the rest, so the
+// field spreads to the extremes as players thin out. With the standard 4-tee
+// layout [200,267,333,400]:
+//
+//	n=2 -> [200, 400]        (indices 0, 3)
+//	n=3 -> [200, 333, 400]   (indices 0, 2, 3)
+//	n=4 -> [200, 267, 333, 400]
+//
+// If n >= len(tees) all tees are used; if n<=1 just the back tee. Preserves the
+// tees' ascending order.
+func selectTees(tees []float64, n int) []float64 {
+	if len(tees) == 0 || n >= len(tees) {
+		return tees
+	}
+	if n <= 1 {
+		return tees[:1]
+	}
+	out := make([]float64, 0, n)
+	out = append(out, tees[0])            // back tee
+	out = append(out, tees[len(tees)-(n-1):]...) // last n-1 (front-most) tees
+	return out
+}
+
 // loadHole builds geometry for a hole and (re)spawns all balls at its tee.
 func (mt *Match) loadHole(idx int) {
 	mt.holeIdx = idx
@@ -378,7 +437,7 @@ func (mt *Match) loadHole(idx int) {
 	// yet) falls back to ball order. If there are more players than tees, the
 	// overflow shares the last tee, staggered by 28px.
 	ranked := mt.rankedBalls()
-	tees := hole.Tees
+	tees := selectTees(hole.Tees, len(ranked))
 	if len(tees) == 0 {
 		tees = []float64{0}
 	}
@@ -396,6 +455,7 @@ func (mt *Match) loadHole(idx int) {
 		b.sunk = false
 		b.finishTick = 0
 		b.holeShots = 0
+		b.dnfIdle = false
 		// Immediately shootable at hole start (the countdown was the pause).
 		b.shootReadyTick = 0
 		b.penaltyPending = false
@@ -548,6 +608,13 @@ func (mt *Match) simulate() {
 			b.penaltyPending = false
 		}
 		b.wasResting = b.ball.Resting
+		// Strokes-mode idle DNF: a ball whose owner hasn't hit within idleCapTicks
+		// times out for the hole. finishTick records the elapsed time for display;
+		// holeMetric ignores it in strokes modes (shots are the score).
+		if metricStrokes(mt.victory) && !b.dnfIdle && b.idleDeadline != 0 && mt.tick >= b.idleDeadline {
+			b.dnfIdle = true
+			b.finishTick = mt.tick - mt.holeStart
+		}
 	}
 }
 
@@ -592,7 +659,29 @@ func (mt *Match) resolveCollisions() {
 	}
 }
 
+// startPlaying transitions the current hole into play: marks the start tick and
+// arms each ball's strokes-mode idle deadline (2 min from now, reset per shot).
+func (mt *Match) startPlaying() {
+	mt.phase = PhasePlaying
+	mt.holeStart = mt.tick
+	for _, b := range mt.balls {
+		b.idleDeadline = mt.tick + idleCapTicks
+	}
+}
+
 func (mt *Match) holeOver() bool {
+	if metricStrokes(mt.victory) {
+		// Strokes modes: no per-hole time cap. The hole ends only when every ball
+		// is either sunk or idle-timed-out (DNF). idleDeadline is enforced in
+		// simulate(), which flips dnfIdle.
+		for _, b := range mt.balls {
+			if !b.sunk && !b.dnfIdle {
+				return false
+			}
+		}
+		return true
+	}
+	// Speed modes: unchanged 3-min per-hole cap plus the all-sunk check.
 	if mt.tick-mt.holeStart >= holeCapTicks {
 		return true
 	}
@@ -605,9 +694,15 @@ func (mt *Match) holeOver() bool {
 }
 
 func (mt *Match) finishHole() {
-	// DNF cap for anyone still out.
+	// DNF handling for anyone still out. Speed modes cap the finish time at the
+	// 3-min hole cap. Strokes modes have no time cap: an unsunk ball here is an
+	// idle-DNF (dnfIdle already set with its elapsed finishTick in simulate).
+	strokes := metricStrokes(mt.victory)
 	for _, b := range mt.balls {
-		if !b.sunk {
+		if b.sunk {
+			continue
+		}
+		if !strokes {
 			b.finishTick = holeCapTicks
 		}
 	}
@@ -648,7 +743,7 @@ func (mt *Match) finishHole() {
 			ms:     ticksToMs(b.finishTick),
 			shots:  b.holeShots,
 			points: holePts[i],
-			dnf:    b.finishTick >= holeCapTicks,
+			dnf:    mt.ballDNF(b),
 		})
 	}
 
@@ -694,12 +789,19 @@ func (mt *Match) broadcastState() {
 		if b.shootReadyTick > mt.tick {
 			readyInMs = ticksToMs(b.shootReadyTick - mt.tick)
 		}
+		// Strokes-mode idle warning: ms until this ball DNFs, sent only inside the
+		// last idleWarnTicks (60s) so the client can flash the red countdown. 0 = hide.
+		idleMsLeft := 0
+		if metricStrokes(mt.victory) && mt.phase == PhasePlaying && !b.sunk && !b.dnfIdle &&
+			b.idleDeadline > mt.tick && b.idleDeadline-mt.tick <= idleWarnTicks {
+			idleMsLeft = ticksToMs(b.idleDeadline - mt.tick)
+		}
 		balls = append(balls, map[string]any{
 			"playerId": b.playerID, "x": x, "y": y,
 			"color": b.color, "resting": resting, "sunk": b.sunk,
 			"readyInMs": readyInMs, "penalty": b.penaltyPending,
 			"inWater": b.sinkTicksLeft > 0, "shots": b.holeShots,
-			"readied": b.readied,
+			"readied": b.readied, "idleMsLeft": idleMsLeft, "dnf": mt.ballDNF(b),
 		})
 	}
 	msLeft := 0
