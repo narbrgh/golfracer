@@ -96,7 +96,7 @@ export const BACKSPIN_EXTRA_DRAG = 0.6
 // already-reduced velocity and stays authoritative on it), so this is a client-only
 // Ken knob like CLUB_MAX_SPEED. Held in a mutable object so the Ken menu can tune it
 // live. Preview + multiplayer prediction inherit the reduced velocity automatically.
-export const DEFAULT_BACKSPIN_POWER = 0.8
+export const DEFAULT_BACKSPIN_POWER = 0.95
 export const BACKSPIN_POWER = { value: DEFAULT_BACKSPIN_POWER }
 
 /** spin string → sign used by the Magnus term: back −1, top +1, else 0. */

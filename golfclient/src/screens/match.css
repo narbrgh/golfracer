@@ -31,6 +31,23 @@
   pointer-events: none;
 }
 
+/* Strokes-mode idle DNF countdown — center-left, red, last 60s of inactivity. */
+.match-idle {
+  position: absolute;
+  left: 28px;
+  top: 50%;
+  transform: translateY(-50%);
+  font: 800 56px/1 system-ui, sans-serif;
+  color: #ff3b30;
+  text-shadow: 0 3px 16px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+  animation: idle-pulse 1s ease-in-out infinite;
+}
+@keyframes idle-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
 /* Leaderboard panel (intermission / results) */
 .match-board {
   position: absolute;

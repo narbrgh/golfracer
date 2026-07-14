@@ -15,6 +15,8 @@ export interface MatchBall {
   inWater: boolean // ball is currently sinking underwater (fade it out)
   shots: number // strokes taken on the current hole
   readied: boolean // clicked OK on the current intermission scorecard
+  idleMsLeft: number // strokes-mode: ms until this ball idle-DNFs; 0 unless in the last 60s
+  dnf: boolean // did-not-finish the current hole (idle timeout / hole cap)
 }
 
 export interface MatchState {

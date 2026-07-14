@@ -105,6 +105,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   let canvas!: HTMLCanvasElement
   let ctx!: CanvasRenderingContext2D
   let countdownEl!: HTMLElement
+  let idleEl!: HTMLElement // red center-left DNF idle countdown (strokes mode, last 60s)
   let boardEl!: HTMLElement
   let chrome!: ReturnType<typeof mountGameChrome>
 
@@ -613,6 +614,18 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     } else {
       countdownEl.style.display = 'none'
     }
+    // Strokes-mode idle DNF warning (my own ball, last 60s): red center-left
+    // countdown. Extrapolate off the last broadcast so it ticks smoothly.
+    const myIdle = state.phase === 'playing'
+      ? state.balls.find((b) => b.playerId === myId)?.idleMsLeft ?? 0
+      : 0
+    if (myIdle > 0) {
+      const left = myIdle - (performance.now() - stateAt)
+      idleEl.style.display = ''
+      idleEl.textContent = `⚠ ${Math.max(0, Math.ceil(left / 1000))}s`
+    } else {
+      idleEl.style.display = 'none'
+    }
   }
 
   function screenPos(ev: MouseEvent | PointerEvent) {
@@ -668,6 +681,11 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       countdownEl.className = 'match-countdown'
       countdownEl.style.display = 'none'
       chrome.root.appendChild(countdownEl)
+
+      idleEl = document.createElement('div')
+      idleEl.className = 'match-idle'
+      idleEl.style.display = 'none'
+      chrome.root.appendChild(idleEl)
 
       boardEl = document.createElement('div')
       boardEl.className = 'match-board'
