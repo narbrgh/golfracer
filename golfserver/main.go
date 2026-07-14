@@ -1061,6 +1061,8 @@ func main() {
 				roomMgr.MatchShoot(pid, msg.VX, msg.VY, msg.Club, msg.Spin)
 			case "matchReturn":
 				roomMgr.MatchReturn(pid)
+			case "matchReady":
+				roomMgr.MatchReady(pid)
 			}
 		}
 	})

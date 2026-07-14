@@ -24,6 +24,7 @@ const SHOT_DELAY_MS = 2500 // matches server shotDelayTicks; water penalty is 2�
 export interface MatchHandlers {
   onShoot: (vx: number, vy: number, club: string, spin: string) => void
   onReturn: () => void
+  onReady: () => void
   onLeave: () => void
 }
 
@@ -54,9 +55,19 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   let bunkerPools: { leftX: number; rightX: number; coeffs: SplineCoeff[] }[] = []
 
   let state: MatchState | null = null
+  let lastBoard: MatchLeaderboard | null = null // for re-rendering the OK/countdown footer from setState
   const render = new Map<number, { x: number; y: number }>()
   // When each ball started sinking underwater (perf-clock ms), for the fade-out.
   const sinkStart = new Map<number, number>()
+  // Floating "+1" water-penalty texts (strokes modes): spawned on the water-entry
+  // edge, they rise and fade over FLOATER_MS. World-anchored at the entry point.
+  const floaters: { x: number; y: number; born: number }[] = []
+  const FLOATER_MS = 1100
+  // Tracks which balls were inWater last frame, to detect the entry edge.
+  const wasInWater = new Set<number>()
+  // Whether the active game mode scores by strokes (drives the +1 floater and the
+  // top-left stroke HUD). Set from the leaderboard's victory string.
+  let strokesMode = false
 
   const cam = new GameCamera()
 
@@ -397,6 +408,30 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     const parabolaColor = engaged ? aimColor : 'rgba(255,255,255,0.85)'
     if (parabolaPts) swing.drawParabolaWorld(ctx, parabolaPts, cam.zoom, parabolaColor)
 
+    // Water-penalty "+1" floaters (world space): rise and fade over FLOATER_MS.
+    // Font counter-scales by zoom so the text stays a constant screen size.
+    if (floaters.length) {
+      const nowF = performance.now()
+      const iz = 1 / cam.zoom
+      for (let i = floaters.length - 1; i >= 0; i--) {
+        const f = floaters[i]
+        const t = (nowF - f.born) / FLOATER_MS
+        if (t >= 1) { floaters.splice(i, 1); continue }
+        const alpha = 1 - t
+        const rise = 34 * t // world px it drifts up over its life
+        ctx.save()
+        ctx.font = `bold ${20 * iz}px system-ui, sans-serif`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.lineWidth = 4 * iz
+        ctx.strokeStyle = `rgba(0,0,0,${0.55 * alpha})`
+        ctx.fillStyle = `rgba(255,90,70,${alpha})`
+        ctx.strokeText('+1', f.x, f.y - rise)
+        ctx.fillText('+1', f.x, f.y - rise)
+        ctx.restore()
+      }
+    }
+
     ctx.restore()
 
     // Central aim zone — the hashed blue circle where a drag starts an aim
@@ -559,8 +594,15 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   function updateHud() {
     if (!state) { chrome.setHud(null); countdownEl.style.display = 'none'; return }
     if (state.phase === 'playing') {
-      const ms = clockBaseMs + (performance.now() - clockAt)
-      chrome.setHud(`Hole ${state.holeIndex + 1}/${state.holeCount}    ⏱ ${(ms / 1000).toFixed(1)}s`)
+      // Strokes modes show the player's current-hole shot count instead of the
+      // race clock (change #2); speed modes keep the timer.
+      if (strokesMode) {
+        const myShots = state.balls.find((b) => b.playerId === myId)?.shots ?? 0
+        chrome.setHud(`Hole ${state.holeIndex + 1}/${state.holeCount}    🏌 ${myShots} ${myShots === 1 ? 'stroke' : 'strokes'}`)
+      } else {
+        const ms = clockBaseMs + (performance.now() - clockAt)
+        chrome.setHud(`Hole ${state.holeIndex + 1}/${state.holeCount}    ⏱ ${(ms / 1000).toFixed(1)}s`)
+      }
       chrome.setWind(windMph)
     } else {
       chrome.setHud(null)
@@ -585,6 +627,12 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     const t = e.target
     if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return
     if (e.key === 'Escape') { e.preventDefault(); chrome.toggleMenu(); return }
+    // During intermission, Space = OK (ready up) instead of Hit / camera nudge.
+    if (state?.phase === 'intermission' && e.key === ' ') {
+      e.preventDefault()
+      if (!state.balls.find((b) => b.playerId === myId)?.readied) handlers.onReady()
+      return
+    }
     if (cam.onKeyDown(e)) { e.preventDefault(); chrome.sync(); return }
     // Swing shortcuts (mirror single-player): 1/2/3 club, 4/5/6 spin, Space = Hit!
     if (e.key === ' ') { e.preventDefault(); fireHit(); return }
@@ -754,11 +802,26 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       state = m
       windMph = m.wind ?? windMph
       stateAt = performance.now()
+      strokesMode = m.victory === 'strokes-total' || m.victory === 'strokes-match'
       if (m.phase === 'playing') { clockBaseMs = m.holeMs; clockAt = stateAt }
       else predActive = false
       if (m.phase === 'playing' || m.phase === 'countdown') boardEl.style.display = 'none'
+      // Keep the intermission footer (ready tally + 10s countdown) live.
+      if (m.phase === 'intermission') renderBoardFooter()
+      // Water-penalty "+1" floaters: spawn on the entry edge (not-inWater → inWater)
+      // in strokes modes. Anchor at the ball's current world position.
+      const now = performance.now()
+      for (const b of m.balls) {
+        if (b.inWater && !wasInWater.has(b.playerId)) {
+          if (strokesMode) floaters.push({ x: b.x, y: b.y - BALL_R * 2, born: now })
+          wasInWater.add(b.playerId)
+        } else if (!b.inWater) {
+          wasInWater.delete(b.playerId)
+        }
+      }
     },
     setLeaderboard(m) {
+      lastBoard = m
       const title = m.final ? 'Final Results' : `Hole ${m.holeIndex + 1} of ${m.holeCount}`
       // Victory = metric (speed|strokes) x scope (total|match). Match scope ranks
       // by rank points; total scope ranks by the raw aggregate. See match.go.
@@ -766,38 +829,108 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       const isMatch = m.victory === 'speed-match' || m.victory === 'strokes-match'
       const totalLabel = isMatch ? 'Points' : strokes ? 'Shots' : 'Total'
       const totalCell = (e: typeof m.entries[number]) =>
-        isMatch ? `${e.matchPts} pts` : strokes ? `${e.totalShots}` : `${(e.totalMs / 1000).toFixed(1)}s`
-      const holeCellOf = (e: typeof m.entries[number]) =>
-        e.dnf ? 'DNF' : strokes ? `${e.holeShots}` : `${(e.holeMs / 1000).toFixed(1)}s`
+        isMatch ? `${e.matchPts}` : strokes ? `${e.totalShots}` : `${(e.totalMs / 1000).toFixed(1)}s`
       // Sort: primary by scope metric, tiebreak by the raw aggregate (lower time / fewer shots).
       const sortKey = isMatch
         ? (a: typeof m.entries[number], b: typeof m.entries[number]) => b.matchPts - a.matchPts || (strokes ? a.totalShots - b.totalShots : a.totalMs - b.totalMs)
         : strokes
           ? (a: typeof m.entries[number], b: typeof m.entries[number]) => a.totalShots - b.totalShots || a.totalMs - b.totalMs
           : (a: typeof m.entries[number], b: typeof m.entries[number]) => a.totalMs - b.totalMs
-      const rows = m.entries
-        .slice()
-        .sort(sortKey)
-        .map((e, i) => {
-          return `<div class="mb-row">
-            <span class="mb-rank">${i + 1}</span>
-            <span class="mb-dot" style="background:${colorHex(e.color)}"></span>
-            <span class="mb-name">${escapeHtml(e.name)}</span>
-            <span class="mb-hole">${holeCellOf(e)}</span>
-            <span class="mb-total">${totalCell(e)}</span>
+      const ranked = m.entries.slice().sort(sortKey)
+
+      // --- Scorecard grid (desktop): a row per player, one column per hole plus a
+      // trailing total column. Cell content depends on the mode. Holes wrap at 9
+      // per band (1-9, then 10-18) via CSS grid; the total column repeats per band.
+      const holeCount = m.holeCount
+      const perBand = 9
+      const bands = Math.ceil(holeCount / perBand)
+      // A single player's cell for hole index h (may be unplayed → blank).
+      const cardCell = (e: typeof m.entries[number], h: number): string => {
+        const r = e.holes[h]
+        if (!r) return `<span class="sc-cell sc-empty"></span>`
+        const metric = r.dnf ? 'DNF' : strokes ? `${r.shots}` : `${(r.ms / 1000).toFixed(1)}`
+        // Match scope shows points earned that hole, but only when > 0.
+        const pts = isMatch && r.points > 0 ? `<span class="sc-pts">+${r.points}</span>` : ''
+        return `<span class="sc-cell"><span class="sc-metric">${metric}</span>${pts}</span>`
+      }
+      const totalOf = (e: typeof m.entries[number]): string =>
+        isMatch ? `${e.matchPts}` : strokes ? `${e.totalShots}` : `${(e.totalMs / 1000).toFixed(1)}`
+      const cols = perBand + 1 // holes + total
+      const bandBlocks = Array.from({ length: bands }, (_, band) => {
+        const start = band * perBand
+        const end = Math.min(start + perBand, holeCount)
+        const headHoles = Array.from({ length: perBand }, (_, i) => {
+          const h = start + i
+          return h < holeCount ? `<span class="sc-h sc-head">${h + 1}</span>` : `<span class="sc-h sc-head sc-empty"></span>`
+        }).join('')
+        const bodyRows = ranked.map((e) => {
+          const cells = Array.from({ length: perBand }, (_, i) => {
+            const h = start + i
+            return h < end ? cardCell(e, h) : `<span class="sc-cell sc-empty"></span>`
+          }).join('')
+          return `<div class="sc-row" style="grid-template-columns:repeat(${cols},1fr)">
+            <span class="sc-name" style="--dot:${colorHex(e.color)}">${escapeHtml(e.name)}</span>
+            ${cells}
+            <span class="sc-cell sc-total"><span class="sc-metric">${totalOf(e)}</span></span>
           </div>`
-        })
-        .join('')
+        }).join('')
+        return `<div class="sc-band">
+          <div class="sc-row sc-headrow" style="grid-template-columns:repeat(${cols},1fr)">
+            <span class="sc-name sc-head">${strokes ? (isMatch ? 'Strokes / Pts' : 'Strokes') : (isMatch ? 'Time / Pts' : 'Time')}</span>
+            ${headHoles}
+            <span class="sc-h sc-head sc-total">${totalLabel}</span>
+          </div>
+          ${bodyRows}
+        </div>`
+      }).join('')
+
+      // --- Compact rank list (always shown; primary readout on mobile). ---
+      const rows = ranked.map((e, i) => `<div class="mb-row">
+          <span class="mb-rank">${i + 1}</span>
+          <span class="mb-dot" style="background:${colorHex(e.color)}"></span>
+          <span class="mb-name">${escapeHtml(e.name)}</span>
+          <span class="mb-total">${totalCell(e)}</span>
+        </div>`).join('')
+
       boardEl.innerHTML = `
         <div class="mb-card">
           <h2 class="mb-title">${title}</h2>
-          <div class="mb-head"><span class="mb-rank"></span><span class="mb-dot"></span><span class="mb-name"></span><span class="mb-hole">This hole</span><span class="mb-total">${totalLabel}</span></div>
-          ${rows}
-          ${m.final ? '<button class="mb-return" type="button">Back to Lobby</button>' : '<div class="mb-next">Next hole starting…</div>'}
+          <div class="mb-scorecard">${bandBlocks}</div>
+          <div class="mb-ranklist">
+            <div class="mb-head"><span class="mb-rank"></span><span class="mb-dot"></span><span class="mb-name"></span><span class="mb-total">${totalLabel}</span></div>
+            ${rows}
+          </div>
+          <div class="mb-footer" data-footer></div>
         </div>`
       boardEl.style.display = ''
-      boardEl.querySelector<HTMLButtonElement>('.mb-return')?.addEventListener('click', () => handlers.onReturn())
+      renderBoardFooter()
     },
+  }
+
+  // Renders the intermission OK/countdown (or final Back-to-Lobby) footer. Called
+  // from setLeaderboard and re-called each setState so the readied tally and the
+  // 10s countdown stay live without rebuilding the whole scorecard.
+  function renderBoardFooter() {
+    const foot = boardEl.querySelector<HTMLElement>('[data-footer]')
+    if (!lastBoard || !foot) return
+    if (lastBoard.final) {
+      foot.innerHTML = `<button class="mb-return" type="button">Back to Lobby</button>`
+      foot.querySelector<HTMLButtonElement>('.mb-return')?.addEventListener('click', () => handlers.onReturn())
+      return
+    }
+    const me = state?.balls.find((b) => b.playerId === myId)
+    const readyCount = state?.balls.filter((b) => b.readied).length ?? 0
+    const total = state?.balls.length ?? 0
+    const countdown = state?.interArmed
+      ? `<span class="mb-count">Next hole in ${Math.max(1, Math.ceil((state.interMsLeft ?? 0) / 1000))}s</span>`
+      : ''
+    const tally = `<span class="mb-tally">${readyCount}/${total} ready</span>`
+    if (me?.readied) {
+      foot.innerHTML = `<span class="mb-waiting">Waiting for others…</span>${tally}${countdown}`
+    } else {
+      foot.innerHTML = `<button class="mb-ok" type="button">OK (Space)</button>${tally}${countdown}`
+      foot.querySelector<HTMLButtonElement>('.mb-ok')?.addEventListener('click', () => handlers.onReady())
+    }
   }
 }
 

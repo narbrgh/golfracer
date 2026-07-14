@@ -13,13 +13,18 @@ export interface MatchBall {
   readyInMs: number // ms until this ball can be shot again (shot cooldown)
   penalty: boolean // the cooldown is a water penalty (draw the double ring)
   inWater: boolean // ball is currently sinking underwater (fade it out)
+  shots: number // strokes taken on the current hole
+  readied: boolean // clicked OK on the current intermission scorecard
 }
 
 export interface MatchState {
   phase: 'countdown' | 'playing' | 'intermission' | 'results'
+  victory: string // active game mode (speed-total | speed-match | strokes-total | strokes-match)
   holeIndex: number
   holeCount: number
   phaseMsLeft: number
+  interMsLeft: number // intermission auto-advance countdown (ms); 0 until armed
+  interArmed: boolean // someone clicked OK, the 10s countdown is running
   holeMs: number
   balls: MatchBall[]
   wind: number // current hole wind, mph (+right / -left)
@@ -41,6 +46,14 @@ export interface LeaderEntry {
   totalShots: number
   holeShots: number
   holeMs: number
+  dnf: boolean
+  holes: HoleResult[] // per-hole record for the scorecard grid (index = hole idx)
+}
+
+export interface HoleResult {
+  ms: number
+  shots: number
+  points: number // rank points earned this hole (Match scope; 0 otherwise)
   dnf: boolean
 }
 
@@ -165,4 +178,5 @@ export class LobbyNet {
   start(): void { this.send({ type: 'start' }) }
   shoot(vx: number, vy: number, club: string, spin: string): void { this.send({ type: 'shoot', vx, vy, club, spin }) }
   matchReturn(): void { this.send({ type: 'matchReturn' }) }
+  matchReady(): void { this.send({ type: 'matchReady' }) }
 }

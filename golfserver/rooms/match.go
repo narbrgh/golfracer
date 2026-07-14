@@ -22,7 +22,7 @@ const (
 	matchTickRate     = time.Second / 60
 	countdownTicks    = 3 * 60
 	holeCapTicks      = 180 * 60 // per-hole time cap (3 min); unsunk at the cap is a DNF — the full 3 min is added to the player's total (see finishHole)
-	intermissionTicks = 6 * 60
+	intermissionCapTicks = 10 * 60 // once someone clicks OK, everyone gets at most 10s before auto-advance
 	resultsTicks      = 25 * 60 // auto-return to lobby if the host never clicks
 	matchBallRadius   = 10.0
 	waterBankOffset   = 20.0
@@ -123,6 +123,8 @@ type matchBall struct {
 	holeShots  int    // shots taken on the current hole
 	totalShots int    // sum of holeShots across holes (strokes-total metric)
 	matchPts   int    // rank points accumulated in Match scope (speed-match / strokes-match)
+	history    []holeResult // per-hole record, appended in finishHole (index = hole idx)
+	readied    bool         // clicked OK on the current intermission scorecard
 
 	// Shot cooldown: the owner may only shoot once tick >= shootReadyTick. Set when
 	// the ball settles (shotDelayTicks) or after a water reset (waterPenaltyTicks,
@@ -137,6 +139,16 @@ type matchBall struct {
 	// bankX/bankY hold the respawn target chosen on entry.
 	sinkTicksLeft uint64
 	bankX, bankY  float64
+}
+
+// holeResult is one player's finished-hole record, kept for the scorecard grid.
+// ms = time to sink (or cap on DNF), shots = strokes on the hole, points = rank
+// points awarded that hole in Match scope (0 in Total scope).
+type holeResult struct {
+	ms     int
+	shots  int
+	points int
+	dnf    bool
 }
 
 type shootCmd struct {
@@ -160,11 +172,13 @@ type Match struct {
 	holeStart    uint64 // tick the current hole's play began
 	lastWinnerID int    // winner of the previous hole (starts on the back tee); 0 = none
 	prevAnyMoving bool  // for rest-silence: were any balls moving last tick
+	interCap     uint64 // tick the intermission 10s cap ends; 0 until the first OK is clicked
 
 	geom holegeom.Geometry
 
 	shoots  chan shootCmd
 	returns chan struct{}
+	readies chan int // playerID that clicked OK on the intermission scorecard
 	done    chan struct{}
 
 	send   func([]byte)
@@ -212,6 +226,8 @@ func (mt *Match) step() bool {
 				mt.onEnd()
 				return false
 			}
+		case pid := <-mt.readies:
+			mt.applyReady(pid)
 		default:
 			drained = true
 		}
@@ -230,7 +246,17 @@ func (mt *Match) step() bool {
 			mt.finishHole()
 		}
 	case PhaseIntermission:
-		if mt.tick >= mt.phaseEnds {
+		// Advance when everyone has readied, or when the 10s cap (armed by the
+		// first OK) elapses — whichever comes first.
+		allReady := true
+		for _, b := range mt.balls {
+			if !b.readied {
+				allReady = false
+				break
+			}
+		}
+		capHit := mt.interCap != 0 && mt.tick >= mt.interCap
+		if allReady || capHit {
 			mt.phase = PhasePlaying
 			mt.holeStart = mt.tick
 		}
@@ -318,6 +344,24 @@ func (mt *Match) applyShoot(c shootCmd) {
 		b.ball.Shoot(vx, vy, physics.SpinValue(c.spin), physics.WindVelFromMph(mt.windMph), c.club == "putter")
 		b.holeShots++
 		return
+	}
+}
+
+// applyReady marks a player OK on the intermission scorecard. The first ready
+// arms the 10s auto-advance cap; the step loop advances once all are ready or the
+// cap elapses. Ignored outside intermission.
+func (mt *Match) applyReady(playerID int) {
+	if mt.phase != PhaseIntermission {
+		return
+	}
+	for _, b := range mt.balls {
+		if b.playerID == playerID && !b.readied {
+			b.readied = true
+			if mt.interCap == 0 {
+				mt.interCap = mt.tick + intermissionCapTicks
+			}
+			return
+		}
 	}
 }
 
@@ -479,6 +523,7 @@ func (mt *Match) simulate() {
 				b.bankX = bankX
 				b.bankY = cty(bankX) - b.ball.Radius
 				b.sinkTicksLeft = waterSinkTicks
+				b.holeShots++ // water hazard = +1 stroke (real-golf penalty; scores strokes modes)
 				entered = true
 				break
 			}
@@ -583,20 +628,28 @@ func (mt *Match) finishHole() {
 		mt.lastWinnerID = winner.playerID // takes the back tee next hole
 	}
 
-	// Match scope: award per-hole rank points to every ball (tie-aware).
+	// Match scope: per-hole rank points to every ball (tie-aware). 0 in Total scope.
+	holePts := make([]int, len(mt.balls))
 	if scopeMatch(mt.victory) {
 		metrics := make([]uint64, len(mt.balls))
 		for i, b := range mt.balls {
 			metrics[i] = mt.holeMetric(b)
 		}
-		for i, p := range holeRankPoints(metrics) {
-			mt.balls[i].matchPts += p
-		}
+		holePts = holeRankPoints(metrics)
 	}
 
-	for _, b := range mt.balls {
+	// Accumulate totals and record this hole into each ball's scorecard history.
+	// Must run before loadHole, which resets holeShots/finishTick for the next hole.
+	for i, b := range mt.balls {
+		b.matchPts += holePts[i]
 		b.totalTicks += b.finishTick
 		b.totalShots += b.holeShots
+		b.history = append(b.history, holeResult{
+			ms:     ticksToMs(b.finishTick),
+			shots:  b.holeShots,
+			points: holePts[i],
+			dnf:    b.finishTick >= holeCapTicks,
+		})
 	}
 
 	last := mt.holeIdx == len(mt.holes)-1
@@ -607,7 +660,12 @@ func (mt *Match) finishHole() {
 	} else {
 		mt.loadHole(mt.holeIdx + 1)
 		mt.phase = PhaseIntermission
-		mt.phaseEnds = mt.tick + intermissionTicks
+		// Ready-gate: no fixed timer. Advance when all click OK, or 10s after the
+		// first OK (interCap, armed on the first ready). phaseEnds stays unset.
+		mt.interCap = 0
+		for _, b := range mt.balls {
+			b.readied = false
+		}
 	}
 }
 
@@ -641,12 +699,22 @@ func (mt *Match) broadcastState() {
 			"color": b.color, "resting": resting, "sunk": b.sunk,
 			"readyInMs": readyInMs, "penalty": b.penaltyPending,
 			"inWater": b.sinkTicksLeft > 0, "shots": b.holeShots,
+			"readied": b.readied,
 		})
 	}
 	msLeft := 0
-	if mt.phase == PhaseCountdown || mt.phase == PhaseIntermission || mt.phase == PhaseResults {
+	if mt.phase == PhaseCountdown || mt.phase == PhaseResults {
 		if mt.phaseEnds > mt.tick {
 			msLeft = ticksToMs(mt.phaseEnds - mt.tick)
+		}
+	}
+	// Intermission countdown: only ticking once the first OK arms interCap.
+	interMsLeft := 0
+	interArmed := false
+	if mt.phase == PhaseIntermission && mt.interCap != 0 {
+		interArmed = true
+		if mt.interCap > mt.tick {
+			interMsLeft = ticksToMs(mt.interCap - mt.tick)
 		}
 	}
 	holeMs := 0
@@ -656,9 +724,12 @@ func (mt *Match) broadcastState() {
 	mt.emit(map[string]any{
 		"type":      "match:state",
 		"phase":     mt.phase,
+		"victory":   mt.victory,
 		"holeIndex": mt.holeIdx,
 		"holeCount": len(mt.holes),
 		"phaseMsLeft": msLeft,
+		"interMsLeft": interMsLeft,
+		"interArmed":  interArmed,
 		"holeMs":    holeMs,
 		"balls":     balls,
 		"wind":      mt.windMph,
@@ -668,11 +739,18 @@ func (mt *Match) broadcastState() {
 func (mt *Match) broadcastLeaderboard(final bool) {
 	entries := make([]map[string]any, 0, len(mt.balls))
 	for _, b := range mt.balls {
+		holes := make([]map[string]any, 0, len(b.history))
+		for _, h := range b.history {
+			holes = append(holes, map[string]any{
+				"ms": h.ms, "shots": h.shots, "points": h.points, "dnf": h.dnf,
+			})
+		}
 		entries = append(entries, map[string]any{
 			"playerId": b.playerID, "name": b.name, "color": b.color,
 			"totalMs": ticksToMs(b.totalTicks), "matchPts": b.matchPts,
 			"totalShots": b.totalShots, "holeShots": b.holeShots,
 			"holeMs": ticksToMs(b.finishTick), "dnf": b.finishTick >= holeCapTicks,
+			"holes": holes,
 		})
 	}
 	mt.emit(map[string]any{
@@ -726,6 +804,7 @@ func (m *Manager) BeginMatch(roomID string, holes []terrain.Hole) {
 		balls:   balls,
 		shoots:  make(chan shootCmd, 64),
 		returns: make(chan struct{}, 4),
+		readies: make(chan int, 8),
 		done:    make(chan struct{}),
 		send:    func(b []byte) { m.Broadcast(roomID, b) },
 		active:  func() bool { return m.roomActive(roomID) },
@@ -762,6 +841,21 @@ func (m *Manager) MatchReturn(playerID int) {
 	if mt != nil {
 		select {
 		case mt.returns <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// MatchReady marks a player OK on the intermission scorecard (change #1: the
+// between-holes screen is a ready-gate, not a fixed timer).
+func (m *Manager) MatchReady(playerID int) {
+	m.mu.Lock()
+	roomID := m.playerRoom[playerID]
+	mt := m.matches[roomID]
+	m.mu.Unlock()
+	if mt != nil {
+		select {
+		case mt.readies <- playerID:
 		default:
 		}
 	}
