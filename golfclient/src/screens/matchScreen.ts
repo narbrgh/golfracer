@@ -3,7 +3,8 @@ import '../gameChrome.css'
 import type { Screen } from './screenManager'
 import type { MatchHole, MatchState, MatchLeaderboard, MatchBall } from '../lobbyNet'
 import type { Hole, BuiltSegment, SplineCoeff } from '../terrain'
-import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs, normalizeTees } from '../terrain'
+import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs, normalizeTees, ensureCW } from '../terrain'
+import type { Platform } from '../terrain'
 import { colorHex } from './roomLobby'
 import { GameCamera, mountGameChrome } from '../gameCamera'
 import { SwingEngine, formatDistance, airStep, WIND_MPH_SCALE, NO_SPIN_BACKSPIN_FRAC } from '../swing'
@@ -273,6 +274,20 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     g.fillStyle = sky
     g.fillRect(0, 0, h.worldW, h.worldH)
 
+    const drawPlatforms = (which: Platform['zOrder']) => {
+      for (const plat of h.platforms) {
+        if (plat.zOrder !== which || plat.points.length < 3) continue
+        const pts = ensureCW(plat.points)
+        g.beginPath()
+        g.moveTo(pts[0].x, pts[0].y)
+        for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y)
+        g.closePath()
+        g.fillStyle = plat.fillColor || '#f5d800'; g.fill()
+        g.strokeStyle = plat.edgeColor || '#b8a000'; g.lineWidth = 2 * iz; g.stroke()
+      }
+    }
+    drawPlatforms('back')
+
     for (const p of waterPools) {
       const wg = g.createLinearGradient(0, p.level, 0, p.floorY)
       wg.addColorStop(0, hexWithAlpha(th.waterFill, 0.92))
@@ -318,6 +333,8 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
 
     g.fillStyle = '#fff'
     for (const tx of h.tees) g.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
+
+    drawPlatforms('front')
 
     const fx = h.holeX + HOLE_W / 2, fy = tY(h.holeX + HOLE_W / 2)
     g.strokeStyle = '#bbb'; g.lineWidth = 2 * iz
