@@ -180,7 +180,10 @@ enforce the boundaries; don't try to route around them.
 ### Verify locally
 
 1. `go run .` in `golfserver/` (listens on :8081).
-2. `VITE_API_URL=http://localhost:8081 npm run dev` in `golfclient/` (:5173).
+2. `VITE_API_URL=http://localhost:8081 VITE_WS_URL=ws://localhost:8081/ws npm run dev`
+   in `golfclient/` (:5173). Both are required: `VITE_API_URL` only covers REST
+   (courses, rooms, version); the game and lobby sockets read `VITE_WS_URL` and
+   otherwise silently connect to production (`api.golfracer.com`).
 3. Drive the client with Playwright (already a devDependency) or load it in a
    browser. Local verification needs no push, so there's no wait on Cloudflare
    or a server rebuild.
