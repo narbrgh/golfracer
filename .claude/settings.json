@@ -1,7 +1,29 @@
 {
   "permissions": {
     "allow": [
-      "Bash(go vet *)"
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(npx vite *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(curl -s * http://localhost:*)",
+      "Bash(lsof -nP -iTCP -sTCP:LISTEN)"
+    ],
+    "ask": [
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(rm *)",
+      "Bash(rmdir *)",
+      "Bash(./deploy.sh *)",
+      "Bash(ssh *)",
+      "Bash(rsync *)",
+      "Bash(scp *)",
+      "Bash(npm install *)",
+      "Bash(go get *)"
     ]
   }
 }

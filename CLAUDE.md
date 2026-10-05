@@ -152,10 +152,35 @@ key) — at that point the compromise cost changes and these are worth doing:
   the physics code especially earns its explanations (see the rest-detection
   notes in `physics/ball.go`).
 - Go: stdlib + gorilla/websocket. Don't add dependencies without asking.
-- TypeScript: no UI framework, no state library. Plain DOM, canvas, modules.
-  Playwright is a permanent devDependency — don't install or remove it.
+- TypeScript: the client currently uses no UI framework or state library —
+  plain DOM, canvas, modules. That's the present state, not a mandate; ask
+  before introducing one. Playwright is a permanent devDependency — don't
+  install or remove it.
 - Tests are Go-side only (`physics/`, `rooms/`, `coursestore/`). There is no
   client test suite; the client is verified by running it.
 - Physics tunables exposed in the Ken menu are session-only knobs for live
   tuning. Changing a *default* means editing `DefaultTunables()` and the
   mirrored client constant.
+- The owner is learning Go: on Go changes, briefly say why the idiom was chosen.
+
+## Autonomy
+
+Work autonomously on `main`, locally — only the owner plays this game, so no
+feature branches are needed. The permission rules in `.claude/settings.json`
+enforce the boundaries; don't try to route around them.
+
+- Before calling anything done: `go vet ./... && go test ./...` (in
+  `golfserver/`) and `npx tsc --noEmit` (in `golfclient/`).
+- Always ask first: `git commit`/`git push` (a push to `main` auto-deploys the
+  client, so it is effectively a prod deploy), `deploy.sh`/`ssh`/`rsync`/`scp`,
+  `rm`/`rmdir`, and new dependencies (`go get`, `npm install`).
+- Classify each change as client, server, or both (see Deploying) and say so in
+  the summary, so the owner knows what a push or deploy would affect.
+
+### Verify locally
+
+1. `go run .` in `golfserver/` (listens on :8081).
+2. `VITE_API_URL=http://localhost:8081 npm run dev` in `golfclient/` (:5173).
+3. Drive the client with Playwright (already a devDependency) or load it in a
+   browser. Local verification needs no push, so there's no wait on Cloudflare
+   or a server rebuild.
