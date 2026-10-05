@@ -43,7 +43,9 @@
       "Bash(node_modules/.bin/tsc --noEmit)",
       "Bash(echo \"TSC: $?\")",
       "Bash(node_modules/.bin/vite build *)",
-      "Bash(python3 /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/5f36765d-cbf2-433d-98fc-5d87d0b78bd2/scratchpad/gen_moonshot.py)"
+      "Bash(python3 /private/tmp/claude-501/-Users-erikinterval-dev-ts-golf01/5f36765d-cbf2-433d-98fc-5d87d0b78bd2/scratchpad/gen_moonshot.py)",
+      "Bash(python3 -)",
+      "Bash(echo \"vet/test exit: $?\")"
     ]
   }
 }
