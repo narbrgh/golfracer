@@ -45,6 +45,7 @@ go vet ./...
 npm run dev              # Vite dev server, usually :5173
 npm run build            # tsc && vite build
 npx tsc --noEmit         # typecheck only
+npm run e2e              # Playwright smoke test (see Autonomy > Verify locally)
 ```
 
 ## Architecture
@@ -156,8 +157,11 @@ key) — at that point the compromise cost changes and these are worth doing:
   plain DOM, canvas, modules. That's the present state, not a mandate; ask
   before introducing one. Playwright is a permanent devDependency — don't
   install or remove it.
-- Tests are Go-side only (`physics/`, `rooms/`, `coursestore/`). There is no
-  client test suite; the client is verified by running it.
+- Go tests cover `physics/`, `rooms/`, `coursestore/`. The client has one
+  Playwright smoke suite, `golfclient/e2e/smoke.mjs` (`npm run e2e`): menu +
+  server status, single-player ball rests on the tee and talks to the local
+  server, a putter shot moves and settles, and room creation. Run it after any
+  client change; extend it when you add client behavior worth guarding.
 - Physics tunables exposed in the Ken menu are session-only knobs for live
   tuning. Changing a *default* means editing `DefaultTunables()` and the
   mirrored client constant.
@@ -170,7 +174,7 @@ feature branches are needed. The permission rules in `.claude/settings.json`
 enforce the boundaries; don't try to route around them.
 
 - Before calling anything done: `go vet ./... && go test ./...` (in
-  `golfserver/`) and `npx tsc --noEmit` (in `golfclient/`).
+  `golfserver/`) and `npx tsc --noEmit && npm run e2e` (in `golfclient/`).
 - Always ask first: `git commit`/`git push` (a push to `main` auto-deploys the
   client, so it is effectively a prod deploy), `deploy.sh`/`ssh`/`rsync`/`scp`,
   `rm`/`rmdir`, and new dependencies (`go get`, `npm install`).
@@ -178,6 +182,11 @@ enforce the boundaries; don't try to route around them.
   the summary, so the owner knows what a push or deploy would affect.
 
 ### Verify locally
+
+`npm run e2e` does all of the following itself (builds the server, starts both
+with the right env vars, drives headless Chromium, tears down). It owns ports
+8081 and 5173 and refuses to start if they're busy, so stop any dev servers
+first. For manual poking:
 
 1. `go run .` in `golfserver/` (listens on :8081).
 2. `VITE_API_URL=http://localhost:8081 VITE_WS_URL=ws://localhost:8081/ws npm run dev`
