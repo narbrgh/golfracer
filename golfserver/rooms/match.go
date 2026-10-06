@@ -290,7 +290,7 @@ func (mt *Match) step() bool {
 	anyMoving := false
 	if mt.phase == PhasePlaying {
 		for _, b := range mt.balls {
-			if !b.sunk && b.ball != nil && !b.ball.Resting {
+			if !b.sunk && b.ball != nil && (!b.ball.Resting || b.ball.Riding) {
 				anyMoving = true
 				break
 			}
@@ -299,6 +299,9 @@ func (mt *Match) step() bool {
 	doBroadcast := phaseChanged
 	if mt.phase == PhasePlaying {
 		if anyMoving || mt.prevAnyMoving {
+			doBroadcast = true
+		} else if mt.geom.HasMotion() && mt.tick%clockHeartbeatTicks == 0 {
+			// Animated platforms: resync clients' platform clocks even at rest.
 			doBroadcast = true
 		} else if mt.tick%6 == 0 && mt.anyIdleWarning() {
 			// At rest but a strokes-mode idle countdown is live: send a low-rate
@@ -500,23 +503,16 @@ func (mt *Match) rankedBalls() []*matchBall {
 func (mt *Match) simulate() {
 	hole := mt.holes[mt.holeIdx]
 	subDt := matchTickRate.Seconds() / 4
+	// Platform clock for this tick (seconds). Derived from the match tick counter so
+	// every ball — and every client, via the "pt" field on match messages — sees
+	// animated platforms in the same place.
+	tickT := mt.platformTime()
+	var ssT float64 // platform time of the current sub-step
 	nearbyEdges := func(b *physics.Ball) []physics.Edge {
-		lo := b.X - b.Radius - 4
-		hi := b.X + b.Radius + 4
-		var nearby []physics.Edge
-		for _, e := range mt.geom.Edges {
-			xMin, xMax := e.X0, e.X1
-			if xMin > xMax {
-				xMin, xMax = xMax, xMin
-			}
-			if xMax < lo || xMin > hi {
-				continue
-			}
-			nearby = append(nearby, e)
-		}
-		return nearby
+		return mt.geom.Nearby(b.X, b.Radius, ssT)
 	}
 	for ss := 0; ss < 4; ss++ {
+		ssT = tickT + float64(ss)*subDt
 		for _, b := range mt.balls {
 			if b.sunk || b.ball == nil {
 				continue
@@ -768,6 +764,15 @@ func (mt *Match) finishHole() {
 
 func ticksToMs(t uint64) int { return int(t) * 1000 / 60 }
 
+// clockHeartbeatTicks: while a hole has animated platforms, broadcast state at
+// least this often even when every ball is at rest, so clients keep their
+// platform clocks in sync (2s at 60 Hz).
+const clockHeartbeatTicks = 120
+
+// platformTime is the shared clock (seconds) that animated platforms are a
+// function of: the match tick counter, which advances identically for all balls.
+func (mt *Match) platformTime() float64 { return float64(mt.tick) / 60 }
+
 func (mt *Match) sendHole(idx int) {
 	mt.emit(map[string]any{
 		"type":      "match:hole",
@@ -775,6 +780,7 @@ func (mt *Match) sendHole(idx int) {
 		"holeCount": len(mt.holes),
 		"hole":      mt.holes[idx],
 		"wind":      mt.windMph,
+		"pt":        mt.platformTime(),
 	})
 }
 
@@ -835,6 +841,7 @@ func (mt *Match) broadcastState() {
 		"holeMs":    holeMs,
 		"balls":     balls,
 		"wind":      mt.windMph,
+		"pt":        mt.platformTime(),
 	})
 }
 

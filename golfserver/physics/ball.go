@@ -184,6 +184,40 @@ type Edge struct {
 	BounceFric     float64 // tangential-speed retention on bounce
 	Sand           bool    // true for bunker surfaces: rolling friction uses Current.BunkerFriction
 	Friction       float64 // per-edge rolling friction (px/s²); 0 → use the global default
+
+	// Surface velocity of the two endpoints (px/s), non-zero only for edges that
+	// belong to an animated platform. Contacts are resolved in the surface's own
+	// frame (ball velocity minus surface velocity), so a ball rides a moving
+	// platform and a platform sweeping into a ball shoves it. Static edges keep
+	// Moving false and never touch this code path, so their physics is unchanged.
+	Moving   bool
+	VX0, VY0 float64
+	VX1, VY1 float64
+}
+
+// SurfaceVel returns the edge's velocity at the point on the edge nearest
+// (px, py): the endpoint velocities blended by position along the segment, which
+// is exact for a rotating edge (velocity grows linearly with distance from the
+// pivot) and trivially right for a sliding one.
+func (e Edge) SurfaceVel(px, py float64) (vx, vy float64) {
+	if !e.Moving || e.Len < 1e-9 {
+		return 0, 0
+	}
+	t := ((px-e.X0)*e.TX + (py-e.Y0)*e.TY) / e.Len
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	return e.VX0 + (e.VX1-e.VX0)*t, e.VY0 + (e.VY1-e.VY0)*t
+}
+
+// WithVelocity returns a copy of the edge marked as moving with the given
+// endpoint velocities.
+func (e Edge) WithVelocity(vx0, vy0, vx1, vy1 float64) Edge {
+	e.Moving = true
+	e.VX0, e.VY0, e.VX1, e.VY1 = vx0, vy0, vx1, vy1
+	return e
 }
 
 // NewEdge builds an Edge from two endpoints with the default (terrain) material.
@@ -289,6 +323,16 @@ type Ball struct {
 	noTouchTicks   int     // consecutive ticks with no edge contact at all
 	stillTime      float64 // seconds spent continuously below Current.RestSpeedThreshold near contact
 
+	// Riding: the ball is at rest relative to a MOVING surface (an animated
+	// platform). It is still Resting for game purposes (shootable, settled), but
+	// Tick keeps simulating it so it is carried along instead of being frozen in
+	// the air as the platform leaves. supVX/supVY is that surface's velocity under
+	// the ball this tick (zero on static ground); prevSup* is last tick's, so rest
+	// detection can be done in the surface's frame.
+	Riding               bool
+	supVX, supVY         float64
+	prevSupVX, prevSupVY float64
+
 	// Set at Shoot time and held for the flight of the current shot.
 	Spin    int     // -1 backspin, 0 none, +1 topspin — drives Magnus + landing bite
 	WindVel float64 // horizontal air velocity (px/s, +right) the ball's flight sees; drag pulls toward it
@@ -310,6 +354,7 @@ func (b *Ball) Shoot(vx, vy float64, spin int, windVel float64, grounded bool) {
 		return
 	}
 	b.Resting = false
+	b.Riding = false
 	b.VX, b.VY = vx, vy
 	b.Spin = spin
 	b.WindVel = windVel
@@ -346,10 +391,34 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 	// until Shoot() clears b.Resting. This prevents gravity from nudging the ball
 	// off a slope between the frame it comes to rest and the frame the player shoots,
 	// matching the reliable freeze behaviour of the water-penalty reset.
-	if b.Resting {
-		b.VX, b.VY = 0, 0
-		return
+	if b.Resting && !b.Riding {
+		// ...except that a MOVING surface running into it wakes it: otherwise a
+		// platform could sweep straight through a ball that happened to be parked
+		// in its path. Static edges never wake a resting ball (the lock is exact).
+		woken := false
+		for _, e := range edges {
+			if !e.Moving {
+				continue
+			}
+			if pen, _, _ := circleEdgeContact(b.X, b.Y, b.Radius, e); pen > 0 {
+				woken = true
+				break
+			}
+		}
+		if !woken {
+			b.VX, b.VY = 0, 0
+			return
+		}
+		b.Resting = false
+		b.stillTime = 0
+		b.wedgeTicks = 0
 	}
+
+	// Support velocity bookkeeping for rest detection in the moving-surface frame.
+	// Both stay zero unless the ball touches an animated platform this tick.
+	b.prevSupVX, b.prevSupVY = b.supVX, b.supVY
+	b.supVX, b.supVY = 0, 0
+	wallSupVX, wallSupVY := 0.0, 0.0
 
 	prevVX, prevVY := b.VX, b.VY
 	startX, startY := b.X, b.Y
@@ -445,19 +514,26 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 			// ball stops against steep surfaces rather than riding up them.
 			b.X += cnx * pen
 			b.Y += cny * pen
-			vn := b.VX*cnx + b.VY*cny
+			// Resolve in the surface's frame (evx/evy are 0 for static edges, so
+			// this reduces exactly to the plain static-wall response).
+			evx, evy := e.SurfaceVel(b.X, b.Y)
+			if e.Moving {
+				wallSupVX, wallSupVY = evx, evy
+			}
+			rvx, rvy := b.VX-evx, b.VY-evy
+			vn := rvx*cnx + rvy*cny
 			if vn < 0 { // only correct if moving into this surface
 				ctx, cty := -cny, cnx // contact tangent (matches edge T for interior contacts)
 				if -vn > MinBounceSpeed {
-					vt := b.VX*ctx + b.VY*cty
+					vt := rvx*ctx + rvy*cty
 					vn = -vn * e.Restitution
 					vt *= e.BounceFric
-					b.VX = vn*cnx + vt*ctx
-					b.VY = vn*cny + vt*cty
+					b.VX = vn*cnx + vt*ctx + evx
+					b.VY = vn*cny + vt*cty + evy
 				} else {
 					// Gentle contact — just kill the into-surface component.
-					b.VX -= vn * cnx
-					b.VY -= vn * cny
+					b.VX = rvx - vn*cnx + evx
+					b.VY = rvy - vn*cny + evy
 				}
 			}
 		}
@@ -472,6 +548,14 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 
 		b.X += fNX * floorPen
 		b.Y += fNY * floorPen
+
+		// Work in the floor surface's frame: subtract its velocity here, add it back
+		// after the response below. Zero for static edges (exact no-op), so only a
+		// ball on an animated platform is carried along with it.
+		fevx, fevy := e.SurfaceVel(b.X, b.Y)
+		b.VX -= fevx
+		b.VY -= fevy
+		b.supVX, b.supVY = fevx, fevy
 
 		vn := b.VX*fNX + b.VY*fNY
 		vt := b.VX*fTX + b.VY*fTY
@@ -553,8 +637,8 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 			vt = vtPrior + slopeGravDt
 		}
 
-		b.VX = vn*fNX + vt*fTX
-		b.VY = vn*fNY + vt*fTY
+		b.VX = vn*fNX + vt*fTX + fevx
+		b.VY = vn*fNY + vt*fTY + fevy
 		b.airTicks = 0
 		b.prevTX, b.prevTY = fTX, fTY
 	} else {
@@ -612,8 +696,14 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 		}
 	}
 
-	speed := math.Hypot(b.VX, b.VY)
-	accel := math.Hypot(b.VX-prevVX, b.VY-prevVY) / dt
+	if floorIdx < 0 {
+		b.supVX, b.supVY = wallSupVX, wallSupVY
+	}
+	// Rest is judged relative to whatever the ball is touching: on static ground
+	// the support velocity is zero and these are the plain speed/accel; on a
+	// moving platform a ball carried along at the platform's velocity is "still".
+	speed := math.Hypot(b.VX-b.supVX, b.VY-b.supVY)
+	accel := math.Hypot((b.VX-b.supVX)-(prevVX-b.prevSupVX), (b.VY-b.supVY)-(prevVY-b.prevSupVY)) / dt
 	// Ball is Resting only when touching, barely moving, and not still being
 	// accelerated by net contact + gravity forces. Measuring actual velocity
 	// change (rather than inferring stillness from a single contact edge's slope)
@@ -669,14 +759,18 @@ func (b *Ball) Tick(dt float64, edges []Edge, leftX, rightX, topY float64) {
 	}
 
 	if b.wedgeTicks >= wedgeRestTicks || b.stillTime >= RestStillTime {
-		b.VX, b.VY = 0, 0
+		b.VX, b.VY = b.supVX, b.supVY // at rest in the support's frame (0,0 on static ground)
+		b.Riding = b.supVX != 0 || b.supVY != 0
 		b.Resting = true
 		b.wedgeTicks = 0
 		b.stillTime = 0
 	} else {
 		b.Resting = touchedAny && speed < Current.RestSpeedThreshold && accel < RestAccelThreshold
 		if b.Resting {
-			b.VX, b.VY = 0, 0
+			b.VX, b.VY = b.supVX, b.supVY
+			b.Riding = b.supVX != 0 || b.supVY != 0
+		} else {
+			b.Riding = false
 		}
 	}
 }

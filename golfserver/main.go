@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"golf01/server/coursestore"
+	"golf01/server/holegeom"
 	"golf01/server/physics"
 	"golf01/server/rooms"
 	"golf01/server/terrain"
@@ -53,6 +54,10 @@ const (
 
 	holeHoldTicks = 180
 
+	// While a hole has animated platforms, an otherwise-silent resting ball still
+	// gets a state frame this often so the client's platform clock stays in sync.
+	clockHeartbeat = 2 * time.Second
+
 	// Bunker rim material: very low restitution (rarely bounces) and low
 	// tangential retention (the ball's sideways speed is killed on contact),
 	// giving a sticky-sand landing.
@@ -82,6 +87,10 @@ type stateMsg struct {
 	Y       float64 `json:"y"`
 	Resting bool    `json:"resting"`
 	Wind    float64 `json:"wind"` // current hole's wind, mph (+right / -left)
+	// PT is the platform clock (seconds since server start) — the `t` that animated
+	// platforms' motion is a function of. Clients resync their local clock from it.
+	// Extra field only: older clients ignore it.
+	PT float64 `json:"pt"`
 }
 
 type eventMsg struct {
@@ -221,111 +230,24 @@ func main() {
 		return false
 	}
 
-	// terrainEdges is the single source of collision geometry for the ball:
-	// terrain tessellated into line segments, plus standalone tee-platform
-	// edges. The same circle-vs-edge response in physics.Ball.Tick handles
-	// every edge identically regardless of origin, which is also what lets
-	// future hand-drawn polygons drop in as more Edges with no special-casing.
-	var terrainEdges []physics.Edge
+	// geom is the single source of collision geometry for the ball, built by
+	// holegeom (the same builder the multiplayer match engine uses): terrain
+	// tessellated into line segments with bunker rims merged in, tee platforms, and
+	// static platforms. Animated platforms are re-posed every physics sub-step via
+	// geom.Nearby. The same circle-vs-edge response in physics.Ball.Tick handles
+	// every edge identically regardless of origin.
+	var geom holegeom.Geometry
+	// Platform clock: seconds since the server started, shared by physics and (via
+	// stateMsg.PT) the client, so animated platforms are in the same place for both.
+	// Wall time rather than a tick count because the loop stays quiet while the
+	// ball rests, yet platforms keep moving.
+	serverStart := time.Now()
+	platClock := func() float64 { return time.Since(serverStart).Seconds() }
+	var terrainEdges []physics.Edge // static edges, for the soft-lock diagnostic
 	rebuildEdges := func() {
 		waterTraps = computeWaterTraps()
-		const step = 4.0
-		holeL := hole.HoleX - holeW/2
-		holeR := hole.HoleX + holeW/2
-		// Only the hole gaps the terrain. Water traps keep solid natural terrain
-		// underneath them — the ball simply gets a water penalty once it crosses
-		// below the pooled surface within a trap's span (see the game loop), which
-		// means a trap can sit on any slope without a pit that lets balls tunnel
-		// out the side or fall forever.
-		inGap := func(x float64) bool {
-			return x >= holeL && x <= holeR
-		}
-
-		// Bunker spline data, precomputed for the merged-surface pass below.
-		type bunkerSurf struct {
-			coeffs        []terrain.SplineCoeff
-			leftX, rightX float64
-		}
-		var bunkerSurfs []bunkerSurf
-		for _, b := range hole.Bunkers {
-			if len(b.TopEdge) < 2 {
-				continue
-			}
-			coeffs := terrain.BunkerRimCoeffs(hole, b.TopEdge)
-			leftX, rightX := b.TopEdge[0].X, b.TopEdge[0].X
-			for _, p := range b.TopEdge {
-				if p.X < leftX {
-					leftX = p.X
-				}
-				if p.X > rightX {
-					rightX = p.X
-				}
-			}
-			bunkerSurfs = append(bunkerSurfs, bunkerSurf{coeffs, leftX, rightX})
-		}
-
-		// surfaceAt returns the collision-surface Y at x and whether that surface
-		// is sand. The ball always rolls on ONE continuous surface: the terrain,
-		// lifted up to the sand top (rim spline) wherever a bunker's rim sits
-		// above the ground. This replaces the terrain edges inside a bunker with
-		// the sand-top line, so there is never a floating rim edge above a
-		// separate terrain floor — which is what let a ball get caught between
-		// the two and be ejected (endless bounce) or slip through (fall-through).
-		surfaceAt := func(x float64) (y float64, sand bool) {
-			y = cty(x)
-			for _, bs := range bunkerSurfs {
-				if x < bs.leftX || x > bs.rightX {
-					continue
-				}
-				if ry := terrain.SplineY(x, bs.coeffs); ry < y {
-					y, sand = ry, true
-				}
-			}
-			return
-		}
-
-		edges := make([]physics.Edge, 0, int(hole.WorldW/step)+8)
-		prevX, prevY, prevSand := 0.0, 0.0, false
-		prevY, prevSand = surfaceAt(0)
-		for x := step; x <= hole.WorldW; x += step {
-			y, sand := surfaceAt(x)
-			if !inGap(prevX) && !inGap(x) {
-				if prevSand || sand {
-					edges = append(edges, physics.NewSandEdge(prevX, prevY, x, y, bunkerRestitution, bunkerBounceFric))
-				} else {
-					edges = append(edges, physics.NewEdge(prevX, prevY, x, y))
-				}
-			}
-			prevX, prevY, prevSand = x, y, sand
-		}
-		addTee := func(teeX float64) {
-			y := cty(teeX) - teeH
-			edges = append(edges, physics.NewEdge(teeX-teeHalfW, y, teeX+teeHalfW, y))
-		}
-		for _, teeX := range hole.Tees {
-			addTee(teeX)
-		}
-
-		// No water wall/floor edges: terrain stays solid under every trap, so the
-		// ball can never tunnel through a pit side or fall forever. It rolls down the
-		// real ground and the water penalty fires the moment it sinks below a trap's
-		// pooled surface (see the game loop).
-
-		// Static platform edges. EnsureCW normalises winding so NewEdge outward
-		// normals always point away from the platform interior.
-		for _, plat := range hole.Platforms {
-			if len(plat.Points) < 3 {
-				continue
-			}
-			fric := plat.PlatformFriction()
-			pts := terrain.EnsureCW(plat.Points)
-			for i := 0; i < len(pts); i++ {
-				a, b := pts[i], pts[(i+1)%len(pts)]
-				edges = append(edges, physics.NewFrictionEdge(a.X, a.Y, b.X, b.Y, fric))
-			}
-		}
-
-		terrainEdges = edges
+		geom = holegeom.Build(hole)
+		terrainEdges = geom.Edges
 	}
 	rebuildEdges()
 
@@ -403,24 +325,12 @@ func main() {
 		return false
 	}
 
-	// nearbyEdges returns the terrain edges whose X-span overlaps the ball, for
-	// collision. Shared by the normal play loop and the submerged-sink loop so
-	// both collide against exactly the same surface.
-	nearbyEdges := func() []physics.Edge {
-		lo := ball.X - ball.Radius - 4
-		hi := ball.X + ball.Radius + 4
-		var nearby []physics.Edge
-		for _, e := range terrainEdges {
-			xMin, xMax := e.X0, e.X1
-			if xMin > xMax {
-				xMin, xMax = xMax, xMin
-			}
-			if xMax < lo || xMin > hi {
-				continue
-			}
-			nearby = append(nearby, e)
-		}
-		return nearby
+	// nearbyEdges returns the collision edges relevant to the ball at platform time
+	// t: static terrain edges overlapping its X-span plus any animated platform
+	// edges (with their surface velocities). Shared by the normal play loop and the
+	// submerged-sink loop so both collide against exactly the same surface.
+	nearbyEdges := func(t float64) []physics.Edge {
+		return geom.Nearby(ball.X, ball.Radius, t)
 	}
 
 	// setActive switches the played/previewed hole. It swaps in the new course +
@@ -455,6 +365,7 @@ func main() {
 	// at rest instead of spamming 60 identical frames/sec).
 	var lastSentX, lastSentY float64
 	var lastSentResting bool
+	var lastSentAt time.Time
 	haveSent := false
 
 	go func() {
@@ -462,6 +373,7 @@ func main() {
 		defer ticker.Stop()
 		for range ticker.C {
 			ballMu.Lock()
+			tickT := platClock()
 			var toSend [][]byte
 			emit := func(v any) {
 				if b, err := json.Marshal(v); err == nil {
@@ -493,7 +405,7 @@ func main() {
 					if ball.VY < 0 {
 						ball.VY *= waterBounceKill // remove upward (bounce) velocity
 					}
-					ball.Tick(subDt, nearbyEdges(), 0, hole.WorldW, 0)
+					ball.Tick(subDt, nearbyEdges(tickT+float64(ss)*subDt), 0, hole.WorldW, 0)
 					if ball.VY < 0 {
 						ball.VY *= waterBounceKill // suppress bounce imparted by Tick
 					}
@@ -530,7 +442,7 @@ func main() {
 				// which is what keeps steep slopes from snapping/flickering.
 				subDt := tickRate.Seconds() / 4
 				for ss := 0; ss < 4; ss++ {
-					ball.Tick(subDt, nearbyEdges(), 0, hole.WorldW, 0)
+					ball.Tick(subDt, nearbyEdges(tickT+float64(ss)*subDt), 0, hole.WorldW, 0)
 
 					// Bunker: the rim is now a real physics surface (edges added in
 					// rebuildEdges), so the ball naturally bounces/rests on it via
@@ -626,8 +538,12 @@ func main() {
 			// changed since the last frame; a resting ball whose state is identical
 			// produces nothing (rest = silence).
 			moving := !state.Resting
-			if !haveSent || moving || state.X != lastSentX || state.Y != lastSentY || state.Resting != lastSentResting {
-				emit(stateMsg{Type: "state", X: state.X, Y: state.Y, Resting: state.Resting, Wind: windMph})
+			// Heartbeat: a resting ball is otherwise silent, but a hole with animated
+			// platforms needs the client's clock resynced now and then.
+			heartbeat := geom.HasMotion() && time.Since(lastSentAt) >= clockHeartbeat
+			if !haveSent || moving || heartbeat || state.X != lastSentX || state.Y != lastSentY || state.Resting != lastSentResting {
+				lastSentAt = time.Now()
+				emit(stateMsg{Type: "state", X: state.X, Y: state.Y, Resting: state.Resting, Wind: windMph, PT: tickT})
 				lastSentX, lastSentY, lastSentResting = state.X, state.Y, state.Resting
 				haveSent = true
 			}
@@ -649,7 +565,7 @@ func main() {
 		// The loop is silent while the ball rests, so a fresh client wouldn't learn
 		// where the ball is. Send it the current position immediately.
 		ballMu.Lock()
-		snap := stateMsg{Type: "state", X: ball.X, Y: ball.Y, Resting: ball.Resting, Wind: windMph}
+		snap := stateMsg{Type: "state", X: ball.X, Y: ball.Y, Resting: ball.Resting, Wind: windMph, PT: platClock()}
 		ballMu.Unlock()
 		if b, err := json.Marshal(snap); err == nil {
 			conn.WriteMessage(websocket.TextMessage, b)
@@ -879,7 +795,7 @@ func main() {
 			if t.WindOverrideOn != 0 {
 				windMph = t.WindOverrideMph
 			}
-			snap := stateMsg{Type: "state", X: ball.X, Y: ball.Y, Resting: ball.Resting, Wind: windMph}
+			snap := stateMsg{Type: "state", X: ball.X, Y: ball.Y, Resting: ball.Resting, Wind: windMph, PT: platClock()}
 			ballMu.Unlock()
 			// Push a state frame so the wind HUD updates at once, even while the ball
 			// rests (the tick loop is silent at rest, so it wouldn't otherwise).

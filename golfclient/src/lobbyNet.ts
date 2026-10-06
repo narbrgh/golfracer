@@ -30,6 +30,7 @@ export interface MatchState {
   holeMs: number
   balls: MatchBall[]
   wind: number // current hole wind, mph (+right / -left)
+  pt?: number // platform clock (s) — what animated platforms' motion is a function of
 }
 
 export interface MatchHole {
@@ -37,6 +38,7 @@ export interface MatchHole {
   holeCount: number
   hole: Hole
   wind: number // current hole wind, mph (+right / -left)
+  pt?: number // platform clock (s); see MatchState.pt
 }
 
 export interface LeaderEntry {

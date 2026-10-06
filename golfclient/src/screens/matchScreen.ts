@@ -3,9 +3,10 @@ import '../gameChrome.css'
 import type { Screen } from './screenManager'
 import type { MatchHole, MatchState, MatchLeaderboard, MatchBall } from '../lobbyNet'
 import type { Hole, BuiltSegment, SplineCoeff } from '../terrain'
-import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs, normalizeTees, ensureCW } from '../terrain'
+import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs, normalizeTees, ensureCW, PlatformMotionSet } from '../terrain'
 import type { Platform } from '../terrain'
 import { colorHex } from './roomLobby'
+import { platformTime, syncPlatformClock } from '../platformClock'
 import { GameCamera, mountGameChrome } from '../gameCamera'
 import { SwingEngine, formatDistance, airStep, WIND_MPH_SCALE, NO_SPIN_BACKSPIN_FRAC } from '../swing'
 
@@ -128,6 +129,9 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     Math.abs((cam.camX - bakedCamX) * cam.zoom) > 0.5 / dpr ||
     Math.abs((cam.camY - bakedCamY) * cam.zoom) > 0.5 / dpr
 
+  // Resolves platform motion/parent links for the current hole (see rebuildCaches).
+  let platSet = new PlatformMotionSet([])
+
   const tY = (x: number): number => {
     if (!hole) return 0
     const s = hole.useSpline, w = hole.useWaves
@@ -140,6 +144,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
   function rebuildCaches() {
     if (!hole) return
     staticDirty = true
+    platSet = new PlatformMotionSet(hole.platforms)
     segs = buildSegments(hole)
     spline = buildSpline(hole.controlPoints)
     const off = baseOffset(hole)
@@ -274,10 +279,12 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     g.fillStyle = sky
     g.fillRect(0, 0, h.worldW, h.worldH)
 
+    const platT = platformTime()
     const drawPlatforms = (which: Platform['zOrder']) => {
-      for (const plat of h.platforms) {
+      for (let pi = 0; pi < h.platforms.length; pi++) {
+        const plat = h.platforms[pi]
         if (plat.zOrder !== which || plat.points.length < 3) continue
-        const pts = ensureCW(plat.points)
+        const pts = platSet.worldPoints(pi, platT, ensureCW(plat.points))
         g.beginPath()
         g.moveTo(pts[0].x, pts[0].y)
         for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y)
@@ -365,7 +372,12 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       staticCanvas.height = canvas.height
       staticDirty = true
     }
-    if (staticDirty || camMoved(dpr)) {
+    if (platSet.anyMoves()) {
+      // Animated platforms are drawn inside the static layers (so they interleave
+      // correctly with terrain), so an animated hole can't use the bake cache.
+      drawStaticWorld(staticCtx, dpr)
+      staticDirty = true
+    } else if (staticDirty || camMoved(dpr)) {
       drawStaticWorld(staticCtx, dpr)
       bakedCamX = cam.camX; bakedCamY = cam.camY; bakedZoom = cam.zoom
       bakedCW = canvas.width; bakedCH = canvas.height; bakedDpr = dpr
@@ -823,6 +835,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     },
     setMyId(id) { myId = id },
     setHole(m) {
+      if (typeof m.pt === 'number') syncPlatformClock(m.pt)
       hole = normalizeTees(m.hole)
       windMph = m.wind ?? 0
       render.clear()
@@ -834,6 +847,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       swing.resetForHole(hole.holeX, hole.tees[0])
     },
     setState(m) {
+      if (typeof m.pt === 'number') syncPlatformClock(m.pt)
       state = m
       windMph = m.wind ?? windMph
       stateAt = performance.now()

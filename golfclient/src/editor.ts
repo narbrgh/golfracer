@@ -1,5 +1,5 @@
-import type { Course, Hole, TerrainSegment, TerrainWave, CourseTheme, ControlPoint, Hazard, Platform, Pt, Bunker } from './terrain'
-import { buildSegments, terrainY, DEFAULT_HOLE, buildSpline, splineY, hexWithAlpha, waterPoolBounds, pointInPoly, SPLINE_BASE_REF, bunkerRimCoeffs, DEFAULT_PLATFORM_FRICTION } from './terrain'
+import type { Course, Hole, TerrainSegment, TerrainWave, CourseTheme, ControlPoint, Hazard, Platform, Pt, Bunker, Motion } from './terrain'
+import { buildSegments, terrainY, DEFAULT_HOLE, buildSpline, splineY, hexWithAlpha, waterPoolBounds, pointInPoly, SPLINE_BASE_REF, bunkerRimCoeffs, DEFAULT_PLATFORM_FRICTION, PlatformMotionSet, MAX_PLATFORM_SPEED } from './terrain'
 import { listCourses, getCourse, saveCourse, newHole, newCourse } from './courseapi'
 import './editor.css'
 
@@ -335,6 +335,41 @@ export function initEditor(opts: {
   let platDragOriginMouse: Pt = { x: 0, y: 0 }
   let platDragOriginPts: Pt[] = []   // snapshot of all vertices at drag start
 
+  // ---- platform motion preview + handles ----
+  // Editing always happens on the REST pose (the authored `points`). The preview
+  // clock only changes what is *drawn*: at t=0 and paused you see the rest pose;
+  // Play/scrub shows the real animated pose (computed with the same PlatformMotionSet
+  // the game uses), with the rest pose kept as a dashed ghost to edit against.
+  let motionPlaying = false
+  let motionPreviewT = 0              // preview clock, seconds
+  let motionPlayStart = 0             // performance.now() when Play was pressed
+  let motionPlayBaseT = 0             // motionPreviewT at that moment
+  let motionScrubEl: HTMLInputElement | null = null
+  let motionTimeEl: HTMLElement | null = null
+  let motionPlayBtn: HTMLButtonElement | null = null
+  let motionDrag: { kind: 'wp'; i: number } | { kind: 'pivot' } | null = null
+  const SCRUB_MAX_S = 20
+
+  const motionShown = () => motionPlaying || motionPreviewT > 0
+
+  function setMotionPlaying(on: boolean) {
+    motionPlaying = on
+    if (on) {
+      motionPlayStart = performance.now(); motionPlayBaseT = motionPreviewT
+      requestAnimationFrame(motionTick)
+    }
+    if (motionPlayBtn) motionPlayBtn.textContent = on ? '⏸ Pause' : '▶ Play'
+  }
+  function motionTick(now: number) {
+    if (!motionPlaying) return
+    if (overlay.style.display === 'none') { setMotionPlaying(false); return }
+    motionPreviewT = motionPlayBaseT + (now - motionPlayStart) / 1000
+    if (motionScrubEl) motionScrubEl.value = String(motionPreviewT % SCRUB_MAX_S)
+    if (motionTimeEl) motionTimeEl.textContent = `${motionPreviewT.toFixed(1)}s`
+    drawPreview()
+    requestAnimationFrame(motionTick)
+  }
+
   // ---- selection model ----
   // Exactly one of {terrain, a bunker, a platform} is "selected". Spline control
   // points are only editable when the terrain is selected, so clicks while editing
@@ -523,19 +558,31 @@ export function initEditor(opts: {
     which: Platform['zOrder'],
     toScreen: (p: Pt) => { sx: number; sy: number },
   ) {
+    const mset = motionShown() ? new PlatformMotionSet(hole.platforms) : null
     for (let pi = 0; pi < hole.platforms.length; pi++) {
       const plat = hole.platforms[pi]
       if (plat.zOrder !== which || plat.points.length < 3) continue
       const sel = pi === selectedPlatIdx
-      const s0 = toScreen(plat.points[0])
+      // Posed shape while previewing motion, otherwise the authored rest pose.
+      const pts = mset ? mset.worldPoints(pi, motionPreviewT, plat.points) : plat.points
+      const s0 = toScreen(pts[0])
       ctx.beginPath(); ctx.moveTo(s0.sx, s0.sy)
-      for (let i = 1; i < plat.points.length; i++) {
-        const s = toScreen(plat.points[i]); ctx.lineTo(s.sx, s.sy)
+      for (let i = 1; i < pts.length; i++) {
+        const s = toScreen(pts[i]); ctx.lineTo(s.sx, s.sy)
       }
       ctx.closePath()
       ctx.fillStyle = plat.fillColor || PLAT_FILL_DEFAULT; ctx.fill()
       ctx.strokeStyle = sel ? PLAT_STROKE_SEL : (plat.edgeColor || PLAT_EDGE_DEFAULT)
       ctx.lineWidth = sel ? 2.5 : 1.5; ctx.stroke()
+      // Dashed rest-pose ghost for the selected platform while it's animating, so the
+      // handles (which edit the rest pose) visibly line up with something.
+      if (mset && sel && mset.moves(pi)) {
+        ctx.save(); ctx.setLineDash([5, 4]); ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1
+        const g0 = toScreen(plat.points[0])
+        ctx.beginPath(); ctx.moveTo(g0.sx, g0.sy)
+        for (let i = 1; i < plat.points.length; i++) { const g = toScreen(plat.points[i]); ctx.lineTo(g.sx, g.sy) }
+        ctx.closePath(); ctx.stroke(); ctx.restore()
+      }
     }
   }
 
@@ -603,6 +650,84 @@ export function initEditor(opts: {
       if (plat.points.length >= 3 && pointInPoly(wx, wy, plat.points)) return pi
     }
     return -1
+  }
+
+  // ---- motion handles (selected platform; drawn on the rest pose) ----
+  const MOTION_COLOR = '#ffa532'
+  const MOTION_HIT_R = 10
+
+  function platCentroid(pts: Pt[]): Pt {
+    let x = 0, y = 0
+    for (const p of pts) { x += p.x; y += p.y }
+    return { x: x / pts.length, y: y / pts.length }
+  }
+  // Farthest vertex from a point — the radius that sets a rotating platform's tip speed.
+  function maxRadiusFrom(pts: Pt[], c: Pt): number {
+    let r = 0
+    for (const p of pts) r = Math.max(r, Math.hypot(p.x - c.x, p.y - c.y))
+    return r
+  }
+  // World positions of a path's origin (platform centre) followed by its waypoints.
+  function pathNodeWorld(plat: Platform): Pt[] {
+    const c = platCentroid(plat.points)
+    return [c, ...(plat.motion?.waypoints ?? []).map(w => ({ x: c.x + w.x, y: c.y + w.y }))]
+  }
+
+  function drawMotionOverlay(
+    ctx: CanvasRenderingContext2D,
+    toScreen: (p: Pt) => { sx: number; sy: number },
+  ) {
+    if (selectedPlatIdx === null) return
+    const plat = hole.platforms[selectedPlatIdx]
+    const m = plat?.motion
+    if (!plat || !m || plat.points.length < 3) return
+    ctx.save()
+    ctx.strokeStyle = MOTION_COLOR; ctx.fillStyle = MOTION_COLOR; ctx.lineWidth = 1.5
+    ctx.font = '10px monospace'; ctx.textAlign = 'center'
+    if (m.kind === 'path') {
+      const nodes = pathNodeWorld(plat).map(toScreen)
+      ctx.setLineDash([6, 4]); ctx.beginPath()
+      nodes.forEach((n, i) => (i ? ctx.lineTo(n.sx, n.sy) : ctx.moveTo(n.sx, n.sy)))
+      if (m.mode === 'loop' && nodes.length > 2) ctx.closePath()
+      ctx.stroke(); ctx.setLineDash([])
+      ctx.beginPath(); ctx.arc(nodes[0].sx, nodes[0].sy, 5, 0, Math.PI * 2); ctx.stroke() // origin
+      for (let i = 1; i < nodes.length; i++) {
+        const { sx, sy } = nodes[i], r = 7
+        ctx.beginPath(); ctx.moveTo(sx, sy - r); ctx.lineTo(sx + r, sy); ctx.lineTo(sx, sy + r); ctx.lineTo(sx - r, sy); ctx.closePath()
+        ctx.fill(); ctx.strokeStyle = '#fff'; ctx.stroke(); ctx.strokeStyle = MOTION_COLOR
+        ctx.fillStyle = '#000'; ctx.fillText(String(i), sx, sy + 3.5); ctx.fillStyle = MOTION_COLOR
+      }
+    } else if (m.kind === 'rotate') {
+      const pivot = m.pivot ?? platCentroid(plat.points)
+      const c = toScreen(pivot)
+      const rWorld = maxRadiusFrom(plat.points, pivot)
+      const edge = toScreen({ x: pivot.x + rWorld, y: pivot.y })
+      ctx.setLineDash([3, 5]); ctx.beginPath(); ctx.arc(c.sx, c.sy, Math.abs(edge.sx - c.sx), 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([])
+      ctx.beginPath(); ctx.moveTo(c.sx - 9, c.sy); ctx.lineTo(c.sx + 9, c.sy); ctx.moveTo(c.sx, c.sy - 9); ctx.lineTo(c.sx, c.sy + 9); ctx.stroke()
+      ctx.beginPath(); ctx.arc(c.sx, c.sy, 6, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.stroke()
+      ctx.fillStyle = MOTION_COLOR; ctx.fillText((m.rpm ?? 0) >= 0 ? '↻' : '↺', c.sx, c.sy - 14)
+    }
+    ctx.restore()
+  }
+
+  function hitTestMotionHandle(
+    cx: number, cy: number,
+    toScreen: (p: Pt) => { sx: number; sy: number },
+  ): { kind: 'wp'; i: number } | { kind: 'pivot' } | null {
+    if (selectedPlatIdx === null) return null
+    const plat = hole.platforms[selectedPlatIdx]
+    const m = plat?.motion
+    if (!plat || !m || plat.points.length < 3) return null
+    if (m.kind === 'path') {
+      const nodes = pathNodeWorld(plat).map(toScreen)
+      for (let i = nodes.length - 1; i >= 1; i--) {
+        if (Math.hypot(cx - nodes[i].sx, cy - nodes[i].sy) <= MOTION_HIT_R) return { kind: 'wp', i: i - 1 }
+      }
+    } else if (m.kind === 'rotate') {
+      const c = toScreen(m.pivot ?? platCentroid(plat.points))
+      if (Math.hypot(cx - c.sx, cy - c.sy) <= MOTION_HIT_R) return { kind: 'pivot' }
+    }
+    return null
   }
 
   // Screen→world helpers for each view mode (used in event handlers).
@@ -848,6 +973,7 @@ export function initEditor(opts: {
     drawBunkerHandles(ctx, toScreenG)
     drawPlatformsPreview(ctx, 'front', toScreenG)
     drawPlatformHandles(ctx, toScreenG)
+    drawMotionOverlay(ctx, toScreenG)
 
     // segment labels
     if (hole.useWaves) {
@@ -1014,6 +1140,7 @@ export function initEditor(opts: {
     // Handles drawn in screen coords (after restore) so they stay a fixed pixel size.
     drawBunkerHandles(ctx, toScreenGV)
     drawPlatformHandles(ctx, toScreenGV)
+    drawMotionOverlay(ctx, toScreenGV)
 
     // minimap (screen coords)
     const { x: mx, y: my, w: mw, h: mh } = GAME_MINIMAP
@@ -1092,6 +1219,9 @@ export function initEditor(opts: {
 
     // ---- platform interactions ----
     if (selectedPlatIdx !== null) {
+      // Motion handles (path waypoints / rotation pivot) win over vertices underneath.
+      const mh = hitTestMotionHandle(cx, cy, toScreen)
+      if (mh) { motionDrag = mh; return }
       const vIdx = hitTestVertex(cx, cy, toScreen)
       if (vIdx !== -1) { platVertDragIdx = vIdx; return }
       const eIdx = hitTestEdgeMid(cx, cy, toScreen)
@@ -1166,6 +1296,20 @@ export function initEditor(opts: {
       emit(); return
     }
 
+    // Motion handle drag (path waypoint offset / rotation pivot)
+    if (motionDrag && selectedPlatIdx !== null) {
+      const plat = hole.platforms[selectedPlatIdx]
+      const m = plat.motion
+      const w = screenToWorld(cx, cy)
+      if (m) {
+        if (motionDrag.kind === 'pivot') m.pivot = { x: w.x, y: w.y }
+        else if (m.waypoints) {
+          const c = platCentroid(plat.points)
+          m.waypoints[motionDrag.i] = { x: w.x - c.x, y: w.y - c.y }
+        }
+      }
+      emit(); return
+    }
     // Platform vertex drag
     if (platVertDragIdx !== -1 && selectedPlatIdx !== null) {
       const w = screenToWorld(cx, cy)
@@ -1214,7 +1358,7 @@ export function initEditor(opts: {
 
   function resetDragState() {
     dragIdx = -1; panDragging = false; miniDragging = false
-    platVertDragIdx = -1; platBodyDragging = false
+    platVertDragIdx = -1; platBodyDragging = false; motionDrag = null
     bunkerVertDragIdx = -1; bunkerBodyDragging = false
   }
   previewCanvas.addEventListener('mouseup',    resetDragState)
@@ -1231,6 +1375,16 @@ export function initEditor(opts: {
       if (b.topEdge.length > 2) {
         const bvIdx = hitTestBunkerVertex(cx, cy, toScreen)
         if (bvIdx !== -1) { b.topEdge.splice(bvIdx, 1); emit(); return }
+      }
+    }
+
+    // Double-click on a path waypoint of the selected platform → delete it (min 1).
+    if (selectedPlatIdx !== null) {
+      const mh = hitTestMotionHandle(cx, cy, toScreen)
+      if (mh && mh.kind === 'wp') {
+        const wps = hole.platforms[selectedPlatIdx].motion?.waypoints
+        if (wps && wps.length > 1) { wps.splice(mh.i, 1); emit(); rebuild() }
+        return
       }
     }
 
@@ -1610,6 +1764,7 @@ export function initEditor(opts: {
 
   function buildPlatformsSection() {
     const { sec, content } = mksec('Platforms')
+    content.appendChild(buildMotionTransport())
     content.appendChild(mkBtn('+ Add Platform', () => {
       // Center the triangle in the current view.
       let cx = hole.worldW / 2, cy = hole.worldH / 2
@@ -1636,6 +1791,173 @@ export function initEditor(opts: {
     sidebar.appendChild(sec)
   }
 
+  // ---- platform motion UI ----
+
+  // Ids are created lazily — only platforms that something else rides on need one.
+  function ensurePlatformId(plat: Platform): string {
+    if (!plat.id) {
+      const taken = new Set(hole.platforms.map(p => p.id))
+      do { plat.id = 'plat-' + Math.random().toString(36).slice(2, 8) } while (taken.has(plat.id))
+    }
+    return plat.id
+  }
+
+  function setMotionKind(plat: Platform, kind: Motion['kind']) {
+    if (kind === 'none') { delete plat.motion; return }
+    if (plat.motion?.kind === kind) return
+    if (kind === 'path') {
+      plat.motion = { kind: 'path', waypoints: [{ x: 160, y: 0 }], speed: 80, mode: 'pingpong', ease: 'sine', phase: 0 }
+    } else {
+      plat.motion = { kind: 'rotate', pivot: platCentroid(plat.points), rpm: 6, phase: 0 }
+    }
+  }
+
+  // Rotation tip speed (px/s) of the farthest vertex — what the physics sees, and
+  // what MAX_PLATFORM_SPEED caps (faster and a ball could tunnel through).
+  function tipSpeed(plat: Platform): number {
+    const m = plat.motion
+    if (!m || m.kind !== 'rotate') return 0
+    const pivot = m.pivot ?? platCentroid(plat.points)
+    return Math.abs(2 * Math.PI * (m.rpm ?? 0) / 60) * maxRadiusFrom(plat.points, pivot)
+  }
+
+  function buildMotionTransport(): HTMLElement {
+    const box = document.createElement('div'); box.className = 'editor-segment'
+    const row = document.createElement('div'); row.className = 'slider-row'
+    const lbl = document.createElement('span'); lbl.className = 'slider-label'; lbl.textContent = 'Preview'
+    motionPlayBtn = mkBtn(motionPlaying ? '⏸ Pause' : '▶ Play', () => setMotionPlaying(!motionPlaying))
+    motionPlayBtn.style.cssText += ';padding:2px 8px;font-size:11px'
+    const rest = mkBtn('Rest pose', () => {
+      setMotionPlaying(false); motionPreviewT = 0
+      if (motionScrubEl) motionScrubEl.value = '0'
+      if (motionTimeEl) motionTimeEl.textContent = '0.0s'
+      drawPreview()
+    })
+    rest.style.cssText += ';padding:2px 8px;font-size:11px'
+    row.append(lbl, motionPlayBtn, rest)
+    box.appendChild(row)
+
+    const scrubRow = document.createElement('div'); scrubRow.className = 'slider-row'
+    const sl = document.createElement('span'); sl.className = 'slider-label'; sl.textContent = 'Time'
+    motionScrubEl = document.createElement('input')
+    motionScrubEl.type = 'range'; motionScrubEl.min = '0'; motionScrubEl.max = String(SCRUB_MAX_S); motionScrubEl.step = '0.05'
+    motionScrubEl.value = String(motionPreviewT % SCRUB_MAX_S)
+    motionTimeEl = document.createElement('span'); motionTimeEl.className = 'slider-num'
+    motionTimeEl.textContent = `${motionPreviewT.toFixed(1)}s`
+    motionScrubEl.addEventListener('input', () => {
+      setMotionPlaying(false)
+      motionPreviewT = parseFloat(motionScrubEl!.value)
+      motionTimeEl!.textContent = `${motionPreviewT.toFixed(1)}s`
+      drawPreview()
+    })
+    scrubRow.append(sl, motionScrubEl, motionTimeEl)
+    box.appendChild(scrubRow)
+
+    const hint = document.createElement('div')
+    hint.style.cssText = 'font:11px monospace;color:#666;padding:2px 0 4px 0'
+    hint.textContent = 'Time 0 shows the rest pose you edit; Play/scrub previews motion.'
+    box.appendChild(hint)
+    return box
+  }
+
+  function buildMotionPanel(plat: Platform, pi: number): HTMLElement {
+    const box = document.createElement('div')
+    box.style.cssText = 'border-top:1px solid #333;margin-top:6px;padding-top:4px'
+    const small = (b: HTMLButtonElement) => { b.style.cssText += ';padding:2px 8px;font-size:11px'; return b }
+    const choice = (label: string, active: boolean, onClick: () => void) => {
+      const b = small(mkBtn(label, onClick)); b.style.opacity = active ? '1' : '0.4'; return b
+    }
+    const labeledRow = (label: string, ...kids: HTMLElement[]) => {
+      const row = document.createElement('div'); row.className = 'slider-row'
+      const l = document.createElement('span'); l.className = 'slider-label'; l.textContent = label
+      row.append(l, ...kids); return row
+    }
+
+    const m = plat.motion
+    const kind = m?.kind ?? 'none'
+    const setKind = (k: Motion['kind']) => { setMotionKind(plat, k); selectPlatform(pi); emit(); rebuild() }
+    box.appendChild(labeledRow('Motion',
+      choice('None', kind === 'none', () => setKind('none')),
+      choice('Slide', kind === 'path', () => setKind('path')),
+      choice('Rotate', kind === 'rotate', () => setKind('rotate')),
+    ))
+
+    if (m && m.kind === 'path') {
+      box.appendChild(sliderRow('Speed', m.speed ?? 80, 10, 400, 5, v => { m.speed = v; emit() }))
+      box.appendChild(labeledRow('Path',
+        choice('Ping-pong', (m.mode ?? 'pingpong') === 'pingpong', () => { m.mode = 'pingpong'; emit(); rebuild() }),
+        choice('Loop', m.mode === 'loop', () => { m.mode = 'loop'; emit(); rebuild() }),
+      ))
+      box.appendChild(labeledRow('Easing',
+        choice('Smooth', (m.ease ?? 'sine') === 'sine', () => { m.ease = 'sine'; emit(); rebuild() }),
+        choice('Linear', m.ease === 'linear', () => { m.ease = 'linear'; emit(); rebuild() }),
+      ))
+      box.appendChild(sliderRow('Offset', m.phase ?? 0, 0, 1, 0.05, v => { m.phase = v; emit() }, v => v.toFixed(2)))
+      const wps = m.waypoints ?? (m.waypoints = [])
+      const wpRow = labeledRow('Waypoints',
+        small(mkBtn('+ Add', () => {
+          const last = wps[wps.length - 1] ?? { x: 0, y: 0 }
+          wps.push({ x: last.x + 100, y: last.y }); selectPlatform(pi); emit(); rebuild()
+        })),
+        (() => {
+          const t = document.createElement('span')
+          t.style.cssText = 'font:11px monospace;color:#888'
+          t.textContent = `${wps.length} (drag ◆ in the preview; double-click deletes)`
+          return t
+        })(),
+      )
+      box.appendChild(wpRow)
+    }
+
+    if (m && m.kind === 'rotate') {
+      const readout = document.createElement('div')
+      readout.style.cssText = 'font:11px monospace;padding:2px 0 4px 0'
+      const refreshReadout = () => {
+        const v = tipSpeed(plat)
+        readout.textContent = `tip speed ${Math.round(v)} px/s (max ${MAX_PLATFORM_SPEED})`
+        readout.style.color = v > MAX_PLATFORM_SPEED ? '#f66' : '#888'
+      }
+      box.appendChild(sliderRow('Spin rpm', m.rpm ?? 6, -30, 30, 0.5, v => { m.rpm = v; refreshReadout(); emit() }, v => v.toFixed(1)))
+      box.appendChild(sliderRow('Start °', m.phase ?? 0, 0, 360, 5, v => { m.phase = v; emit() }))
+      box.appendChild(labeledRow('Pivot',
+        small(mkBtn('Center', () => { m.pivot = platCentroid(plat.points); selectPlatform(pi); emit(); rebuild() })),
+        (() => {
+          const t = document.createElement('span')
+          t.style.cssText = 'font:11px monospace;color:#888'
+          t.textContent = 'or drag the ● in the preview'
+          return t
+        })(),
+      ))
+      refreshReadout()
+      box.appendChild(readout)
+    }
+
+    // Parent: ride along with another platform's motion (e.g. blades on a hub).
+    // Descendants are excluded so a link can never form a cycle.
+    const descendants = new Set<Platform>()
+    const collect = (p: Platform) => {
+      if (!p.id) return
+      for (const o of hole.platforms) if (o.parent === p.id && !descendants.has(o)) { descendants.add(o); collect(o) }
+    }
+    collect(plat)
+    const sel = document.createElement('select')
+    sel.style.cssText = 'font:11px monospace;max-width:150px'
+    sel.add(new Option('— world —', ''))
+    hole.platforms.forEach((o, oi) => {
+      if (o === plat || descendants.has(o)) return
+      sel.add(new Option(`Platform ${oi + 1}`, String(oi)))
+    })
+    const cur = plat.parent ? hole.platforms.findIndex(o => o.id === plat.parent) : -1
+    sel.value = cur >= 0 ? String(cur) : ''
+    sel.addEventListener('change', () => {
+      if (sel.value === '') delete plat.parent
+      else plat.parent = ensurePlatformId(hole.platforms[parseInt(sel.value, 10)])
+      emit(); rebuild()
+    })
+    box.appendChild(labeledRow('Rides on', sel))
+    return box
+  }
+
   function buildPlatformEl(plat: Platform, pi: number): HTMLElement {
     const el = document.createElement('div')
     el.className = 'editor-segment' + (pi === selectedPlatIdx ? ' platform-selected' : '')
@@ -1651,12 +1973,18 @@ export function initEditor(opts: {
         fillColor: plat.fillColor,
         edgeColor: plat.edgeColor,
         friction: plat.friction,
+        // The copy keeps the same motion and parent but gets its own id lazily
+        // (ensurePlatformId), since ids must stay unique.
+        ...(plat.motion ? { motion: structuredClone(plat.motion) } : {}),
+        ...(plat.parent ? { parent: plat.parent } : {}),
       }
       hole.platforms.splice(pi + 1, 0, copy)
       selectPlatform(pi + 1)
       emit(); rebuild()
     })
     const del = mkBtn('×', () => {
+      // Anything riding on the deleted platform becomes free-standing again.
+      if (plat.id) for (const o of hole.platforms) if (o.parent === plat.id) delete o.parent
       hole.platforms.splice(pi, 1)
       if (selectedPlatIdx === pi) selectTerrain()
       else if (selectedPlatIdx !== null && selectedPlatIdx > pi) selectedPlatIdx--
@@ -1682,6 +2010,8 @@ export function initEditor(opts: {
     // means the shared default (DEFAULT_PLATFORM_FRICTION); the slider shows that.
     el.appendChild(sliderRow('Friction', plat.friction ?? DEFAULT_PLATFORM_FRICTION,
       0, 2000, 50, v => { plat.friction = v; emit() }))
+
+    el.appendChild(buildMotionPanel(plat, pi))
 
     const ptCount = document.createElement('div')
     ptCount.style.cssText = 'font:11px monospace;color:#666;padding:2px 0 4px 0'

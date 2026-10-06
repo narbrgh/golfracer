@@ -6,12 +6,13 @@
 // It owns ports 8081 (Go server; the port is a const in main.go) and 5173, and
 // refuses to start if either is busy so it never fights your own dev servers.
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
 import { chromium } from 'playwright'
+import * as T from '../src/terrain.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const clientDir = join(here, '..')
@@ -21,6 +22,15 @@ const WS = 'ws://localhost:8081/ws'
 const APP = 'http://localhost:5173'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// `npm run e2e -- --shots` saves screenshots of key moments for eyeballing the UI.
+const SHOTS_DIR = process.argv.includes('--shots') ? join(tmpdir(), 'golfracer-e2e-shots') : null
+async function shot(page, name) {
+  if (!SHOTS_DIR) return
+  mkdirSync(SHOTS_DIR, { recursive: true })
+  await page.screenshot({ path: join(SHOTS_DIR, `${name}.png`) })
+  console.log(`       [shot] ${join(SHOTS_DIR, name)}.png`)
+}
 
 async function isUp(url) {
   try { await fetch(url, { signal: AbortSignal.timeout(1000) }); return true } catch { return false }
@@ -94,6 +104,25 @@ async function waitFor(cond, what, ms = 10000) {
   const deadline = Date.now() + ms
   while (Date.now() < deadline) { if (cond()) return; await sleep(50) }
   throw new Error(`timed out waiting for ${what}`)
+}
+
+// Ground height at x for a hole — mirrors tY() in main.ts (spline and waves can combine).
+function groundAt(hole, x) {
+  const segs = T.buildSegments(hole), coeffs = T.buildSpline(hole.controlPoints)
+  const s = hole.useSpline, w = hole.useWaves
+  return s && w ? T.splineY(x, coeffs) + T.terrainY(x, segs) - T.SPLINE_BASE_REF
+    : s ? T.splineY(x, coeffs) + hole.baseGround - T.SPLINE_BASE_REF
+    : w ? T.terrainY(x, segs)
+    : hole.baseGround
+}
+
+// The first course (the one single-player loads), with `platforms` added to hole 0.
+async function courseWithPlatforms(platforms) {
+  const infos = await (await fetch(`${API}/courses`)).json()
+  const course = await (await fetch(`${API}/courses/${infos[0].id}`)).json()
+  course.holes[0].platforms = platforms
+  T.normalizeTees(course.holes[0])
+  return course
 }
 
 async function run() {
@@ -186,6 +215,136 @@ async function run() {
       assert.equal(lobbySocket?.url, 'ws://localhost:8081/lobby', 'lobby socket must point at the local server')
       const rooms = await (await fetch(`${API}/rooms`)).json()
       assert.ok(rooms.some((r) => r.name === 'e2e-room'), `rooms list should include e2e-room, got ${JSON.stringify(rooms)}`)
+      assert.deepEqual(rec.errors, [])
+      await page.context().close()
+    })
+
+    await test('server: a sliding platform shoves a resting ball (course push → physics → wire)', async () => {
+      // The ball sits on the tee. A wall ping-pongs through it (150px left of the tee to
+      // 150px right), so it sweeps the ball once per half-cycle — in whichever direction the
+      // wall happens to be travelling when the server's platform clock reaches it.
+      const course0 = await courseWithPlatforms([])
+      const hole = course0.holes[0]
+      const teeX = hole.tees[0]
+      const ballY = groundAt(hole, teeX) - 10 - 10
+      const course = await courseWithPlatforms([{
+        id: 'wall', zOrder: 'front', fillColor: '#f0f', edgeColor: '#f0f',
+        points: [{ x: teeX - 150, y: ballY - 60 }, { x: teeX - 140, y: ballY - 60 }, { x: teeX - 140, y: ballY + 10 }, { x: teeX - 150, y: ballY + 10 }],
+        motion: { kind: 'path', waypoints: [{ x: 300, y: 0 }], speed: 100, mode: 'pingpong', ease: 'linear' },
+      }])
+      const frames = []
+      const ws = new WebSocket(WS)
+      await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('ws connect failed')) })
+      ws.onmessage = (e) => frames.push(JSON.parse(e.data))
+      ws.send(JSON.stringify({ type: 'course', data: course, hole: 0 }))
+      try {
+        await waitFor(() => frames.some((f) => f.type === 'event' && f.event === 'reset'), 'reset after course push')
+        const reset = frames.filter((f) => f.type === 'event' && f.event === 'reset').at(-1)
+        assert.ok(Math.abs(reset.x - teeX) < 2, `ball should start on the tee (${reset.x} vs ${teeX})`)
+        // The platform clock must be present on state frames.
+        await waitFor(() => frames.some((f) => f.type === 'state' && typeof f.pt === 'number'), 'state frame carrying pt')
+        // Within one 12s cycle the wall sweeps through the ball and pushes it.
+        try {
+          await waitFor(() => frames.some((f) => f.type === 'state' && f.resting === false && Math.abs(f.x - reset.x) > 5), 'ball pushed by the wall', 20000)
+        } catch (e) {
+          const st = frames.filter((f) => f.type === 'state')
+          throw new Error(`${e.message}\n tee ${teeX}, ballY ${ballY}; ${st.length} state frames, pt range ${st[0]?.pt?.toFixed(2)}..${st.at(-1)?.pt?.toFixed(2)}; last ${JSON.stringify(st.at(-1))}`)
+        }
+      } finally { ws.close() }
+    })
+
+    await test('client: an animated platform is drawn and visibly moves', async () => {
+      const course0 = await courseWithPlatforms([])
+      const hole = course0.holes[0]
+      const teeX = hole.tees[0]
+      const groundY = groundAt(hole, teeX)
+      // A big magenta block hovering near the tee, bobbing up and down.
+      const course = await courseWithPlatforms([{
+        id: 'bob', zOrder: 'front', fillColor: '#ff00ff', edgeColor: '#ff00ff',
+        points: [{ x: teeX + 40, y: groundY - 260 }, { x: teeX + 140, y: groundY - 260 }, { x: teeX + 140, y: groundY - 200 }, { x: teeX + 40, y: groundY - 200 }],
+        motion: { kind: 'path', waypoints: [{ x: 0, y: -90 }], speed: 60, mode: 'pingpong', ease: 'sine' },
+      }])
+      const { page, rec } = await openPage(browser)
+      await page.route(new RegExp('/courses/[^/]+$'), (route) => {
+        if (route.request().method() !== 'GET') return route.continue()
+        route.fulfill({ contentType: 'application/json', body: JSON.stringify(course) })
+      })
+      await page.goto(APP)
+      await page.click('[data-action="single"]')
+      await waitFor(() => stateFrames(rec).length > 0, 'first state frame')
+      // Centroid (screen y) of magenta pixels on the game canvas.
+      const centroid = () => page.evaluate(() => {
+        const c = [...document.querySelectorAll('canvas')].sort((a, b) => b.width * b.height - a.width * a.height)[0]
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data
+        let n = 0, sy = 0
+        for (let i = 0; i < d.length; i += 4) {
+          if (d[i] > 220 && d[i + 1] < 40 && d[i + 2] > 220) { n++; sy += Math.floor(i / 4 / c.width) }
+        }
+        return { n, y: n ? sy / n : NaN }
+      })
+      await sleep(1500) // let the camera settle after the course push
+      await shot(page, 'game-animated-platform')
+      const samples = []
+      for (let k = 0; k < 6; k++) { samples.push(await centroid()); await sleep(450) }
+      assert.ok(samples.every((s) => s.n > 200), `platform should be visible in every sample: ${JSON.stringify(samples.map((s) => s.n))}`)
+      const ys = samples.map((s) => s.y)
+      const spread = Math.max(...ys) - Math.min(...ys)
+      assert.ok(spread > 8, `platform should move on screen (centroid y spread ${spread.toFixed(1)}px): ${ys.map((y) => y.toFixed(0)).join(', ')}`)
+      assert.deepEqual(rec.errors, [])
+      await page.context().close()
+    })
+
+    await test('editor: give a platform Rotate then Slide motion; preview animates and the server receives it', async () => {
+      const { page, rec } = await openPage(browser)
+      const sent = []
+      page.on('websocket', (ws) => ws.on('framesent', (f) => { try { sent.push(JSON.parse(f.payload)) } catch { /* binary */ } }))
+      await page.goto(APP)
+      await page.click('[data-action="editor"]')
+      await page.waitForSelector('.editor-overlay', { state: 'visible' })
+      await page.click('.editor-sidebar button:text-is("+ Add Platform")')
+
+      // Bounding box + centroid of the default yellow platform (#f5d800) on the preview canvas.
+      const shape = () => page.evaluate(() => {
+        const c = document.querySelector('.preview-canvas-wrap canvas')
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data
+        let n = 0, sx = 0, minY = 1e9, maxY = -1
+        for (let i = 0; i < d.length; i += 4) {
+          if (d[i] > 235 && d[i + 1] > 205 && d[i + 1] < 225 && d[i + 2] < 40) {
+            const px = (i / 4) % c.width, py = Math.floor(i / 4 / c.width)
+            n++; sx += px; if (py < minY) minY = py; if (py > maxY) maxY = py
+          }
+        }
+        return { n, x: n ? sx / n : NaN, h: maxY - minY }
+      })
+      const sample = async (count, gapMs) => { const out = []; for (let k = 0; k < count; k++) { out.push(await shape()); await sleep(gapMs) } return out }
+
+      const rest = await shape()
+      assert.ok(rest.n > 100, `the added platform should be visible (found ${rest.n} px)`)
+
+      // Rotate: the skinny platform sweeps through angles, so its bounding-box height changes a lot.
+      await page.click('.editor-sidebar button:text-is("Rotate")')
+      await page.click('.editor-sidebar button:has-text("Play")')
+      await shot(page, 'editor-rotate')
+      const spin = await sample(5, 500)
+      const hs = spin.map((s) => s.h)
+      assert.ok(Math.max(...hs) - Math.min(...hs) > 10, `rotating platform should change shape; bbox heights ${hs.join(', ')}`)
+      let course = sent.filter((m) => m.type === 'course').at(-1)
+      let plat = course?.data.holes[course.hole].platforms.at(-1)
+      assert.equal(plat?.motion?.kind, 'rotate', 'server should receive the rotate motion')
+      assert.ok(plat.motion.pivot && plat.motion.rpm !== 0, 'rotation needs a pivot and a speed')
+
+      // Slide: the platform translates, so its centroid x moves.
+      await page.click('.editor-sidebar button:text-is("Slide")')
+      await page.click('.editor-sidebar button:has-text("Rest pose")')
+      await page.click('.editor-sidebar button:has-text("Play")')
+      await shot(page, 'editor-slide')
+      const slide = await sample(5, 450)
+      const xs = slide.map((s) => s.x)
+      assert.ok(Math.max(...xs) - Math.min(...xs) > 5, `sliding platform should move; centroid x ${xs.map((x) => x.toFixed(0)).join(', ')}`)
+      course = sent.filter((m) => m.type === 'course').at(-1)
+      plat = course?.data.holes[course.hole].platforms.at(-1)
+      assert.equal(plat?.motion?.kind, 'path')
+      assert.ok(plat.motion.waypoints.length >= 1 && plat.motion.speed > 0, 'a path needs waypoints and a speed')
       assert.deepEqual(rec.errors, [])
       await page.context().close()
     })

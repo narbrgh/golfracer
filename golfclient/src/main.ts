@@ -1,7 +1,8 @@
-import { buildSegments, terrainY, hexWithAlpha, buildSpline, splineY, waterPoolBounds, ensureCW, SPLINE_BASE_REF, bunkerRimCoeffs } from './terrain'
+import { buildSegments, terrainY, hexWithAlpha, buildSpline, splineY, waterPoolBounds, ensureCW, SPLINE_BASE_REF, bunkerRimCoeffs, PlatformMotionSet } from './terrain'
 import type { Course, Hole, BuiltSegment, SplineCoeff, Platform } from './terrain'
 import { initEditor } from './editor'
 import { listCourses, getCourse, newCourse } from './courseapi'
+import { platformTime, syncPlatformClock } from './platformClock'
 import { SwingEngine, formatDistance, WIND_MPH_SCALE } from './swing'
 import { GameCamera, mountGameChrome } from './gameCamera'
 import './gameChrome.css'
@@ -34,6 +35,8 @@ const SHOT_DELAY_MS    = 2500
 let courseData: Course = newCourse('untitled', 'Untitled')
 let activeHole = 0
 let hole: Hole = courseData.holes[activeHole]
+// Resolves platform parent links / motion for the active hole (rebuilt in updateHole).
+let platSet = new PlatformMotionSet(hole.platforms)
 let builtSegs: BuiltSegment[] = buildSegments(hole)
 let splineCoeffs: SplineCoeff[] = buildSpline(hole.controlPoints)
 
@@ -132,6 +135,7 @@ function ballInBunker(): boolean {
 // terrain/water/bunker caches from it.
 function updateHole(h: Hole) {
   hole = h
+  platSet = new PlatformMotionSet(h.platforms)
   staticDirty = true
   builtSegs = buildSegments(h)
   splineCoeffs = buildSpline(h.controlPoints)
@@ -270,9 +274,11 @@ function drawBunkers() {
 }
 
 function drawPlatforms(which: Platform['zOrder']) {
-  for (const plat of hole.platforms) {
+  const t = platformTime()
+  for (let pi = 0; pi < hole.platforms.length; pi++) {
+    const plat = hole.platforms[pi]
     if (plat.zOrder !== which || plat.points.length < 3) continue
-    const pts = ensureCW(plat.points)
+    const pts = platSet.worldPoints(pi, t, ensureCW(plat.points))
     ctx.beginPath()
     ctx.moveTo(pts[0].x, pts[0].y)
     for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y)
@@ -574,7 +580,12 @@ function draw() {
     staticCanvas.height = canvas.height
     staticDirty = true
   }
-  if (staticDirty || staticCamMoved()) {
+  if (platSet.anyMoves()) {
+    // Animated platforms live in the static layers (so they interleave correctly
+    // with terrain), which means the world can't be cached: redraw it each frame.
+    drawStaticWorld()
+    staticDirty = true
+  } else if (staticDirty || staticCamMoved()) {
     drawStaticWorld()
     staticCtx.setTransform(1, 0, 0, 1, 0, 0)
     staticCtx.clearRect(0, 0, staticCanvas.width, staticCanvas.height)
@@ -942,6 +953,7 @@ function onEvent(m: { event: string; x: number; y: number; vx?: number; vy?: num
 
 ws.onmessage = (e) => {
   const m = JSON.parse(e.data)
+  if (typeof m.pt === 'number') syncPlatformClock(m.pt)
   if (m.type === 'event') onEvent(m)
   else {
     if (typeof m.wind === 'number') windMph = m.wind

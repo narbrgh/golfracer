@@ -190,6 +190,14 @@ type Platform struct {
 	// platform's edges. nil → the DefaultPlatformFriction below. Per-platform so
 	// designers can make an icy ledge or a sticky green.
 	Friction *float64 `json:"friction,omitempty"`
+
+	// Animation (see motion.go). Points are always the authored rest pose; Motion
+	// moves them over time, and Parent (another platform's ID) makes this platform
+	// ride along with that one's motion — e.g. windmill blades on a rotating hub.
+	// All optional: a platform with none of these is static, as before.
+	ID     string  `json:"id,omitempty"`
+	Parent string  `json:"parent,omitempty"`
+	Motion *Motion `json:"motion,omitempty"`
 }
 
 // DefaultPlatformFriction is the rolling friction applied to platform edges when

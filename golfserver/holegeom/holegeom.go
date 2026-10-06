@@ -1,12 +1,19 @@
 // Package holegeom builds the physics collision geometry for a single hole:
 // terrain (with bunker rims merged in), tee platforms, static platforms, plus the
 // resolved water traps. It's a clean extraction of the geometry logic that the
-// single-player loop in main.go builds inline, so the multiplayer match engine can
-// reuse the exact same surfaces. (The single-player loop still has its own inline
-// copy; unifying the two is a future cleanup.)
+// single-player loop in main.go used to build inline; both the single-player loop
+// and the multiplayer match engine now build their surfaces here, so they always
+// collide against exactly the same geometry.
+//
+// Animated platforms (terrain.Platform.Motion) are NOT baked into Edges: only
+// static platforms are. Animated ones are re-posed from the shared motion math
+// each physics sub-step via Nearby, which also attaches each edge's surface
+// velocity so the physics can carry and shove balls.
 package holegeom
 
 import (
+	"math"
+
 	"golf01/server/physics"
 	"golf01/server/terrain"
 )
@@ -38,11 +45,90 @@ type Bunker struct {
 
 // Geometry is everything the physics loop needs for one hole.
 type Geometry struct {
+	// Edges is the STATIC collision geometry: terrain, tees, and platforms that
+	// never move. Animated platforms are added per sub-step by Nearby.
 	Edges   []physics.Edge
 	Water   []WaterTrap
 	Bunkers []Bunker
 	// CTY returns the natural terrain surface Y at x (no bunker rim lift).
 	CTY func(float64) float64
+
+	motion *terrain.MotionSet // platforms with winding normalised; nil when nothing moves
+	anim   []animPlat
+}
+
+// animPlat is one animated platform: its index in motion and its rolling friction.
+type animPlat struct {
+	idx      int
+	friction float64
+}
+
+// HasMotion reports whether the hole has any animated platform.
+func (g Geometry) HasMotion() bool { return len(g.anim) > 0 }
+
+// velSampleDt is the finite-difference window for surface velocity. Small enough
+// to be a good derivative of the (smooth) motion, large enough to avoid float noise.
+const velSampleDt = 0.002
+
+// Nearby returns the collision edges relevant to a ball of the given radius at
+// ballX: the static edges whose X-span overlaps it, plus every animated platform
+// edge at platform time t (seconds on the hole's shared motion clock) carrying its
+// surface velocity.
+func (g Geometry) Nearby(ballX, radius, t float64) []physics.Edge {
+	lo := ballX - radius - 4
+	hi := ballX + radius + 4
+	var nearby []physics.Edge
+	for _, e := range g.Edges {
+		xMin, xMax := e.X0, e.X1
+		if xMin > xMax {
+			xMin, xMax = xMax, xMin
+		}
+		if xMax < lo || xMin > hi {
+			continue
+		}
+		nearby = append(nearby, e)
+	}
+	return g.appendAnimated(nearby, lo, hi, t)
+}
+
+// AnimatedEdges returns every animated platform edge at time t, unfiltered. Used by
+// tests and diagnostics.
+func (g Geometry) AnimatedEdges(t float64) []physics.Edge {
+	return g.appendAnimated(nil, math.Inf(-1), math.Inf(1), t)
+}
+
+func (g Geometry) appendAnimated(dst []physics.Edge, lo, hi, t float64) []physics.Edge {
+	for _, a := range g.anim {
+		now := g.motion.WorldPoints(a.idx, t)
+		prev := g.motion.WorldPoints(a.idx, t-velSampleDt)
+		n := len(now)
+		for i := 0; i < n; i++ {
+			j := (i + 1) % n
+			p0, p1 := now[i], now[j]
+			xMin, xMax := p0.X, p1.X
+			if xMin > xMax {
+				xMin, xMax = xMax, xMin
+			}
+			if xMax < lo || xMin > hi {
+				continue
+			}
+			v0x, v0y := capSpeed((p0.X-prev[i].X)/velSampleDt, (p0.Y-prev[i].Y)/velSampleDt)
+			v1x, v1y := capSpeed((p1.X-prev[j].X)/velSampleDt, (p1.Y-prev[j].Y)/velSampleDt)
+			dst = append(dst, physics.NewFrictionEdge(p0.X, p0.Y, p1.X, p1.Y, a.friction).
+				WithVelocity(v0x, v0y, v1x, v1y))
+		}
+	}
+	return dst
+}
+
+// capSpeed clamps a surface velocity to terrain.MaxPlatformSpeed so a badly
+// authored platform can't move fast enough to tunnel through a ball.
+func capSpeed(vx, vy float64) (float64, float64) {
+	if sp := math.Hypot(vx, vy); sp > terrain.MaxPlatformSpeed {
+		k := terrain.MaxPlatformSpeed / sp
+		return vx * k, vy * k
+	}
+	return vx, vy
 }
 
 // Build assembles the collision geometry for a hole.
@@ -119,14 +205,32 @@ func Build(hole terrain.Hole) Geometry {
 		addTee(teeX)
 	}
 
-	for _, plat := range hole.Platforms {
+	// Platforms. Winding is normalised on the authored (rest-pose) polygon: rigid
+	// motion preserves it, so animated platforms keep correct outward normals at
+	// every instant. Static ones become edges now; animated ones are re-posed per
+	// sub-step in Nearby.
+	cwPlats := make([]terrain.Platform, len(hole.Platforms))
+	for i, plat := range hole.Platforms {
+		cwPlats[i] = plat
+		if len(plat.Points) >= 3 {
+			cwPlats[i].Points = terrain.EnsureCW(plat.Points)
+		}
+	}
+	ms := terrain.NewMotionSet(cwPlats)
+	var anim []animPlat
+	for i, plat := range cwPlats {
 		if len(plat.Points) < 3 {
 			continue
 		}
 		fric := plat.PlatformFriction()
-		pts := terrain.EnsureCW(plat.Points)
-		for i := 0; i < len(pts); i++ {
-			a, b := pts[i], pts[(i+1)%len(pts)]
+		if ms.Moves(i) {
+			anim = append(anim, animPlat{idx: i, friction: fric})
+			continue
+		}
+		// Nothing in its parent chain moves, so its rest pose is its pose forever.
+		pts := plat.Points
+		for k := 0; k < len(pts); k++ {
+			a, b := pts[k], pts[(k+1)%len(pts)]
 			edges = append(edges, physics.NewFrictionEdge(a.X, a.Y, b.X, b.Y, fric))
 		}
 	}
@@ -146,5 +250,10 @@ func Build(hole terrain.Hole) Geometry {
 		water = append(water, WaterTrap{CX: hz.CX, L: l, R: r, Surface: wl})
 	}
 
-	return Geometry{Edges: edges, Water: water, Bunkers: bunkers, CTY: cty}
+	g := Geometry{Edges: edges, Water: water, Bunkers: bunkers, CTY: cty}
+	if len(anim) > 0 {
+		g.motion = ms
+		g.anim = anim
+	}
+	return g
 }

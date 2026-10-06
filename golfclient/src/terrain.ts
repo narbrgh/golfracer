@@ -155,11 +155,169 @@ export interface Platform {
   // Rolling friction (px/s²) for a ball on this platform. undefined → server
   // default (DEFAULT_PLATFORM_FRICTION). Per-platform so a ledge can be icy/sticky.
   friction?: number
+  // Animation (see "Platform motion" below). `points` is always the authored rest
+  // pose; `motion` moves it over time, and `parent` (another platform's `id`)
+  // makes this platform ride along with that one's motion. All optional: a
+  // platform with none of these is static.
+  id?: string
+  parent?: string
+  motion?: Motion
 }
 
 // Mirrors golfserver terrain.DefaultPlatformFriction — the friction applied when
 // a platform doesn't set its own. Keep in sync with the server constant.
 export const DEFAULT_PLATFORM_FRICTION = 800
+
+// ---- Platform motion ----
+// Mirrors golfserver/terrain/motion.go — keep the two in lockstep. Motion is a
+// pure function of time, so the server's physics, the in-game renderer and the
+// editor preview all agree by calling the same math. The shared golden vectors
+// live in motion_test.go (Go) and e2e/motion.test.mjs (this file).
+
+export interface Motion {
+  kind: 'none' | 'path' | 'rotate'
+  // path: visits [(0,0), ...waypoints] (offsets from the authored position) and
+  // returns, at `speed` px/s on average.
+  waypoints?: Pt[]
+  speed?: number
+  mode?: 'loop' | 'pingpong'   // loop: …→last→first; pingpong: …→last→…→first
+  ease?: 'linear' | 'sine'     // sine slows to a stop at each waypoint
+  phase?: number               // path: fraction of a cycle (0..1); rotate: degrees
+  // rotate: spin about `pivot` (rest-pose coordinates) at `rpm` revolutions/min;
+  // positive is clockwise on screen (Y points down).
+  pivot?: Pt
+  rpm?: number
+}
+
+/** Cap on any point's surface speed (px/s); mirrors terrain.MaxPlatformSpeed. */
+export const MAX_PLATFORM_SPEED = 600
+
+/** 2D rigid transform: p' = [c -s; s c]·p + (tx, ty). */
+export interface Xform { c: number; s: number; tx: number; ty: number }
+
+export const IDENTITY: Xform = { c: 1, s: 0, tx: 0, ty: 0 }
+
+export function applyXform(x: Xform, p: Pt): Pt {
+  return { x: x.c * p.x - x.s * p.y + x.tx, y: x.s * p.x + x.c * p.y + x.ty }
+}
+
+/** The transform that applies b first, then x (x ∘ b). */
+export function composeXform(x: Xform, b: Xform): Xform {
+  const t = applyXform(x, { x: b.tx, y: b.ty })
+  return { c: x.c * b.c - x.s * b.s, s: x.s * b.c + x.c * b.s, tx: t.x, ty: t.y }
+}
+
+export function motionIsMoving(m: Motion | undefined): boolean {
+  if (!m) return false
+  if (m.kind === 'path') return (m.waypoints?.length ?? 0) > 0 && (m.speed ?? 0) > 0
+  if (m.kind === 'rotate') return (m.rpm ?? 0) !== 0 && !!m.pivot
+  return false
+}
+
+// The closed cycle of points a path visits, starting and ending at the origin.
+function pathNodes(m: Motion): Pt[] {
+  const pts: Pt[] = [{ x: 0, y: 0 }, ...(m.waypoints ?? [])]
+  if (m.mode === 'pingpong' || pts.length === 2) {
+    for (let i = pts.length - 2; i >= 0; i--) pts.push(pts[i])
+    return pts
+  }
+  pts.push({ x: 0, y: 0 })
+  return pts
+}
+
+/** Translation of a platform at time t along its path. */
+export function pathOffset(m: Motion, t: number): Pt {
+  const speed = m.speed ?? 0
+  if (speed <= 0 || !m.waypoints || m.waypoints.length === 0) return { x: 0, y: 0 }
+  const nodes = pathNodes(m)
+  const segs: number[] = []
+  let total = 0
+  for (let i = 0; i < nodes.length - 1; i++) {
+    const d = Math.hypot(nodes[i + 1].x - nodes[i].x, nodes[i + 1].y - nodes[i].y) / speed
+    segs.push(d); total += d
+  }
+  if (total <= 0) return { x: 0, y: 0 }
+  let tau = (t + (m.phase ?? 0) * total) % total
+  if (tau < 0) tau += total
+  for (let i = 0; i < segs.length; i++) {
+    const d = segs[i]
+    if (d <= 0) continue
+    if (tau < d || i === segs.length - 1) {
+      let f = Math.min(tau / d, 1)
+      if (m.ease === 'sine') f = (1 - Math.cos(Math.PI * f)) / 2
+      const a = nodes[i], b = nodes[i + 1]
+      return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f }
+    }
+    tau -= d
+  }
+  return { x: 0, y: 0 }
+}
+
+/** A platform's own motion at time t, acting on rest-pose coordinates. */
+export function localXform(m: Motion | undefined, t: number): Xform {
+  if (!m) return IDENTITY
+  if (m.kind === 'path') {
+    const o = pathOffset(m, t)
+    return { c: 1, s: 0, tx: o.x, ty: o.y }
+  }
+  if (m.kind === 'rotate' && m.pivot) {
+    const ang = 2 * Math.PI * (m.rpm ?? 0) / 60 * t + (m.phase ?? 0) * Math.PI / 180
+    const c = Math.cos(ang), s = Math.sin(ang)
+    // rotate about the pivot: p' = R·p + (P − R·P)
+    const rp = applyXform({ c, s, tx: 0, ty: 0 }, m.pivot)
+    return { c, s, tx: m.pivot.x - rp.x, ty: m.pivot.y - rp.y }
+  }
+  return IDENTITY
+}
+
+const MAX_PARENT_DEPTH = 8
+
+/**
+ * Resolves platform parent links once so per-frame pose lookups are a short chain
+ * walk. Unknown parents are treated as the world and parent cycles are cut, same
+ * as the server.
+ */
+export class PlatformMotionSet {
+  private plats: Platform[]
+  private parent: number[]
+  constructor(plats: Platform[]) {
+    this.plats = plats
+    const byId = new Map<string, number>()
+    plats.forEach((p, i) => { if (p.id) byId.set(p.id, i) })
+    this.parent = plats.map((p, i) => {
+      const j = p.parent ? byId.get(p.parent) : undefined
+      return j !== undefined && j !== i ? j : -1
+    })
+  }
+  /** True when platform i (or anything above it in the parent chain) has motion. */
+  moves(i: number): boolean {
+    for (let d = 0; i >= 0 && d < MAX_PARENT_DEPTH; d++) {
+      if (motionIsMoving(this.plats[i].motion)) return true
+      i = this.parent[i]
+    }
+    return false
+  }
+  /** Any platform in the set moves. */
+  anyMoves(): boolean { return this.plats.some((_, i) => this.moves(i)) }
+  /** Platform i's world transform at time t (parent chain composed root-first). */
+  xform(i: number, t: number): Xform {
+    const chain: number[] = []
+    for (let d = 0; i >= 0 && d < MAX_PARENT_DEPTH; d++) { chain.push(i); i = this.parent[i] }
+    let x = IDENTITY
+    for (let k = chain.length - 1; k >= 0; k--) x = composeXform(x, localXform(this.plats[chain[k]].motion, t))
+    return x
+  }
+  /** Platform i's polygon (given in `points`, e.g. already CW-normalised) at time t. */
+  worldPoints(i: number, t: number, points: Pt[] = this.plats[i].points): Pt[] {
+    if (!this.moves(i)) return points
+    const x = this.xform(i, t)
+    return points.map((p) => applyXform(x, p))
+  }
+}
+
+export function hasAnimatedPlatforms(h: { platforms: Platform[] }): boolean {
+  return new PlatformMotionSet(h.platforms).anyMoves()
+}
 
 // Signed area of a polygon in screen/Y-down coordinates.
 // Positive → clockwise (CW) on screen, which is what NewEdge expects for
