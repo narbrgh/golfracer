@@ -117,3 +117,23 @@ func TestSaveRejectsBadID(t *testing.T) {
 		}
 	}
 }
+
+// v1 courses stored Platform.zOrder as "front"/"back"; v2 uses a numeric layer
+// (back -> 50, front -> 150) around the ground at 100.
+func TestMigratePlatformLayers(t *testing.T) {
+	src := `{"formatVersion":1,"id":"x","name":"X","holes":[{"platforms":[
+		{"points":[],"zOrder":"back"},{"points":[],"zOrder":"front"},{"points":[]}]}]}`
+	c, err := LoadCourse([]byte(src))
+	if err != nil {
+		t.Fatalf("LoadCourse: %v", err)
+	}
+	if c.FormatVersion != CurrentFormatVersion {
+		t.Errorf("formatVersion = %d, want %d", c.FormatVersion, CurrentFormatVersion)
+	}
+	want := []int{50, 150, 150}
+	for i, p := range c.Holes[0].Platforms {
+		if p.Layer != want[i] {
+			t.Errorf("platform %d layer = %d, want %d", i, p.Layer, want[i])
+		}
+	}
+}

@@ -25,7 +25,7 @@ import (
 // CurrentFormatVersion is the schema version this build writes and migrates up
 // to. Bump it by one whenever the on-disk shape changes, and add a migration
 // step keyed by the previous version (see migrations).
-const CurrentFormatVersion = 1
+const CurrentFormatVersion = 2
 
 // Course is a full course: identity metadata plus up to 18 holes. It is the
 // on-disk unit (one file per course) and the unit the HTTP API serves.
@@ -71,9 +71,38 @@ func Normalize(c Course) Course {
 //
 // v0 -> v1 is special-cased in migrate(): a pre-versioning file is either a bare
 // hole (today's shape, no "holes" key) which gets wrapped into a one-hole
-// course, or already course-shaped. There are no real v>=1 migrations yet; new
-// entries get added here as the schema evolves.
-var migrations = map[int]func(map[string]any) map[string]any{}
+// course, or already course-shaped. New entries get added here as the schema
+// evolves.
+var migrations = map[int]func(map[string]any) map[string]any{
+	1: migratePlatformLayers,
+}
+
+// migratePlatformLayers is v1 -> v2: Platform.zOrder "front"/"back" became a
+// numeric layer (ground sits at 100): back -> 50, front -> 150.
+func migratePlatformLayers(raw map[string]any) map[string]any {
+	holes, _ := raw["holes"].([]any)
+	for _, h := range holes {
+		hole, _ := h.(map[string]any)
+		plats, _ := hole["platforms"].([]any)
+		for _, p := range plats {
+			plat, _ := p.(map[string]any)
+			if plat == nil {
+				continue
+			}
+			z, _ := plat["zOrder"].(string)
+			delete(plat, "zOrder")
+			if _, has := plat["layer"]; has {
+				continue
+			}
+			if z == "back" {
+				plat["layer"] = 50
+			} else {
+				plat["layer"] = 150
+			}
+		}
+	}
+	return raw
+}
 
 var idPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 

@@ -178,12 +178,14 @@ type Bunker struct {
 }
 
 // Platform is a convex or concave polygon that the ball can bounce off.
-// ZOrder controls rendering: "front" draws above terrain, "back" draws behind it.
+// Layer controls rendering order: layers below 100 draw behind the ground, layers
+// of 100 and above draw in front of it; higher numbers draw on top of lower ones.
 // Points should be stored in the order the editor produced them; EnsureCW
 // normalises winding for physics before building edges.
 type Platform struct {
 	Points    []ControlPoint `json:"points"`
-	ZOrder    string         `json:"zOrder"` // "front" | "back"
+	Layer     int            `json:"layer"`
+	Name      string         `json:"name,omitempty"` // editor label only
 	FillColor string         `json:"fillColor"`
 	EdgeColor string         `json:"edgeColor"`
 	// Rolling friction (px/s² kinetic deceleration) for a ball rolling on this

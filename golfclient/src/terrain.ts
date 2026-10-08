@@ -149,7 +149,10 @@ export interface Pt { x: number; y: number }
 
 export interface Platform {
   points: Pt[]
-  zOrder: 'front' | 'back'  // front = above terrain, back = behind terrain
+  // Draw order: below GROUND_LAYER draws behind the ground, GROUND_LAYER and above
+  // draws in front of it; higher numbers draw on top of lower ones.
+  layer: number
+  name?: string           // editor label only
   fillColor: string
   edgeColor: string
   // Rolling friction (px/s²) for a ball on this platform. undefined → server
@@ -162,6 +165,20 @@ export interface Platform {
   id?: string
   parent?: string
   motion?: Motion
+}
+
+// The layer the ground itself sits at: platforms below it are drawn before (behind)
+// the ground, platforms at or above it after (in front).
+export const GROUND_LAYER = 100
+// Layer given to new platforms (in front of the ground).
+export const DEFAULT_PLATFORM_LAYER = 150
+
+/** Indices of the platforms to draw before (`above` false) or after (`above` true)
+ *  the ground, lowest layer first; equal layers keep array order. */
+export function platformsOnSide(platforms: Platform[], above: boolean): number[] {
+  const out: number[] = []
+  platforms.forEach((p, i) => { if ((p.layer >= GROUND_LAYER) === above) out.push(i) })
+  return out.sort((a, b) => platforms[a].layer - platforms[b].layer || a - b)
 }
 
 // Mirrors golfserver terrain.DefaultPlatformFriction — the friction applied when

@@ -244,7 +244,7 @@ async function run() {
       const teeX = hole.tees[0]
       const ballY = groundAt(hole, teeX) - 10 - 10
       const course = await courseWithPlatforms([{
-        id: 'wall', zOrder: 'front', fillColor: '#f0f', edgeColor: '#f0f',
+        id: 'wall', layer: 150, fillColor: '#f0f', edgeColor: '#f0f',
         points: [{ x: teeX - 150, y: ballY - 60 }, { x: teeX - 140, y: ballY - 60 }, { x: teeX - 140, y: ballY + 10 }, { x: teeX - 150, y: ballY + 10 }],
         motion: { kind: 'path', waypoints: [{ x: 300, y: 0 }], speed: 100, mode: 'pingpong', ease: 'linear' },
       }])
@@ -279,7 +279,7 @@ async function run() {
       const groundY = groundAt(hole, teeX)
       // A big magenta block hovering near the tee, bobbing up and down.
       const course = await courseWithPlatforms([{
-        id: 'bob', zOrder: 'front', fillColor: '#ff00ff', edgeColor: '#ff00ff',
+        id: 'bob', layer: 150, fillColor: '#ff00ff', edgeColor: '#ff00ff',
         points: [{ x: teeX + 40, y: groundY - 260 }, { x: teeX + 140, y: groundY - 260 }, { x: teeX + 140, y: groundY - 200 }, { x: teeX + 40, y: groundY - 200 }],
         motion: { kind: 'path', waypoints: [{ x: 0, y: -90 }], speed: 60, mode: 'pingpong', ease: 'sine' },
       }])

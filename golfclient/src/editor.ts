@@ -1,5 +1,5 @@
 import type { Course, Hole, TerrainSegment, TerrainWave, CourseTheme, ControlPoint, Hazard, Platform, Pt, Bunker, Motion } from './terrain'
-import { buildSegments, terrainY, DEFAULT_HOLE, buildSpline, splineY, hexWithAlpha, waterPoolBounds, pointInPoly, SPLINE_BASE_REF, bunkerRimCoeffs, DEFAULT_PLATFORM_FRICTION, PlatformMotionSet, MAX_PLATFORM_SPEED } from './terrain'
+import { buildSegments, terrainY, DEFAULT_HOLE, buildSpline, splineY, hexWithAlpha, waterPoolBounds, pointInPoly, SPLINE_BASE_REF, bunkerRimCoeffs, DEFAULT_PLATFORM_FRICTION, PlatformMotionSet, MAX_PLATFORM_SPEED, GROUND_LAYER, DEFAULT_PLATFORM_LAYER, platformsOnSide } from './terrain'
 import { listCourses, getCourse, saveCourse, newHole, newCourse } from './courseapi'
 import './editor.css'
 
@@ -552,16 +552,17 @@ export function initEditor(opts: {
   const VERT_R = 6   // vertex handle radius (screen px)
   const MID_R  = 4   // edge-midpoint handle radius
 
-  // Draw all platforms whose zOrder matches `which`. `toScreen` maps world→canvas.
+  // Draw the platforms behind (`above` false) or in front of (`above` true) the
+  // ground, lowest layer first. `toScreen` maps world→canvas.
   function drawPlatformsPreview(
     ctx: CanvasRenderingContext2D,
-    which: Platform['zOrder'],
+    above: boolean,
     toScreen: (p: Pt) => { sx: number; sy: number },
   ) {
     const mset = motionShown() ? new PlatformMotionSet(hole.platforms) : null
-    for (let pi = 0; pi < hole.platforms.length; pi++) {
+    for (const pi of platformsOnSide(hole.platforms, above)) {
       const plat = hole.platforms[pi]
-      if (plat.zOrder !== which || plat.points.length < 3) continue
+      if (plat.points.length < 3) continue
       const sel = pi === selectedPlatIdx
       // Posed shape while previewing motion, otherwise the authored rest pose.
       const pts = mset ? mset.worldPoints(pi, motionPreviewT, plat.points) : plat.points
@@ -948,7 +949,7 @@ export function initEditor(opts: {
     }
 
     const toScreenG = (p: Pt) => ({ sx: tx(p.x), sy: ty(p.y) })
-    drawPlatformsPreview(ctx, 'back', toScreenG)
+    drawPlatformsPreview(ctx, false, toScreenG)
 
     // Water is drawn before the terrain, as a plain rectangle — the terrain
     // fill (opaque down to worldH) then paints over whatever part of that
@@ -971,7 +972,7 @@ export function initEditor(opts: {
 
     drawActiveXMarker(ctx, tx, ty)
     drawBunkerHandles(ctx, toScreenG)
-    drawPlatformsPreview(ctx, 'front', toScreenG)
+    drawPlatformsPreview(ctx, true, toScreenG)
     drawPlatformHandles(ctx, toScreenG)
     drawMotionOverlay(ctx, toScreenG)
 
@@ -1082,7 +1083,7 @@ export function initEditor(opts: {
 
     const toScreenGV = (p: Pt) => ({ sx: (p.x - gvCamX) * gvZoom, sy: (p.y - gvCamY) * gvZoom })
     const identity   = (p: Pt) => ({ sx: p.x, sy: p.y })
-    drawPlatformsPreview(ctx, 'back', identity)
+    drawPlatformsPreview(ctx, false, identity)
     drawWaterTrapsPreview(ctx, x => x, y => y)
     drawBunkersPreview(ctx, x => x, y => y)
 
@@ -1098,7 +1099,7 @@ export function initEditor(opts: {
     ctx.strokeStyle = th.groundLine; ctx.lineWidth = th.groundLineW; ctx.stroke()
 
     drawActiveXMarker(ctx, x => x, y => y)
-    drawPlatformsPreview(ctx, 'front', identity)
+    drawPlatformsPreview(ctx, true, identity)
 
     // world border
     ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 6 / gvZoom
@@ -1148,10 +1149,26 @@ export function initEditor(opts: {
     ctx.strokeStyle = '#444'; ctx.lineWidth = 1; ctx.strokeRect(mx, my, mw, mh)
     const mmx = (wx: number) => mx + (wx / hole.worldW) * mw
     const mmy = (wy: number) => my + (wy / hole.worldH) * mh
+    // Platforms, posed like the main preview; behind-ground layers first, then the terrain line.
+    const miniMset = motionShown() ? new PlatformMotionSet(hole.platforms) : null
+    const drawMiniPlatforms = (above: boolean) => {
+      for (const pi of platformsOnSide(hole.platforms, above)) {
+        const plat = hole.platforms[pi]
+        if (plat.points.length < 3) continue
+        const pts = miniMset ? miniMset.worldPoints(pi, motionPreviewT, plat.points) : plat.points
+        ctx.beginPath(); ctx.moveTo(mmx(pts[0].x), mmy(pts[0].y))
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(mmx(pts[i].x), mmy(pts[i].y))
+        ctx.closePath()
+        ctx.fillStyle = plat.fillColor || PLAT_FILL_DEFAULT; ctx.fill()
+        ctx.strokeStyle = plat.edgeColor || PLAT_EDGE_DEFAULT; ctx.lineWidth = 1; ctx.stroke()
+      }
+    }
+    drawMiniPlatforms(false)
     ctx.strokeStyle = '#556644'; ctx.lineWidth = 1; ctx.beginPath()
     for (let x = 0; x <= hole.worldW; x += 60)
       x === 0 ? ctx.moveTo(mmx(x), mmy(ptY(x))) : ctx.lineTo(mmx(x), mmy(ptY(x)))
     ctx.stroke()
+    drawMiniPlatforms(true)
     const rx = mmx(gvCamX), ry = mmy(gvCamY)
     const rw = (vW / hole.worldW) * mw, rh = (vH / hole.worldH) * mh
     ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.fillRect(rx, ry, rw, rh)
@@ -1776,7 +1793,7 @@ export function initEditor(opts: {
       const src = selectedPlatIdx !== null ? hole.platforms[selectedPlatIdx] : null
       const plat: Platform = {
         points: makeDefaultPlatform(cx, cy),
-        zOrder: src?.zOrder ?? 'front',
+        layer: src?.layer ?? DEFAULT_PLATFORM_LAYER,
         fillColor: src?.fillColor ?? PLAT_FILL_DEFAULT,
         edgeColor: src?.edgeColor ?? PLAT_EDGE_DEFAULT,
         friction: src?.friction,
@@ -1936,7 +1953,7 @@ export function initEditor(opts: {
       box.appendChild(readout)
     }
 
-    // Parent: ride along with another platform's motion (e.g. blades on a hub).
+    // Parent: move (and rotate) with another platform's motion (e.g. blades on a hub).
     // Descendants are excluded so a link can never form a cycle.
     const descendants = new Set<Platform>()
     const collect = (p: Platform) => {
@@ -1949,7 +1966,7 @@ export function initEditor(opts: {
     sel.add(new Option('— world —', ''))
     hole.platforms.forEach((o, oi) => {
       if (o === plat || descendants.has(o)) return
-      sel.add(new Option(`Platform ${oi + 1}`, String(oi)))
+      sel.add(new Option(o.name || `Platform ${oi + 1}`, String(oi)))
     })
     const cur = plat.parent ? hole.platforms.findIndex(o => o.id === plat.parent) : -1
     sel.value = cur >= 0 ? String(cur) : ''
@@ -1958,7 +1975,8 @@ export function initEditor(opts: {
       else plat.parent = ensurePlatformId(hole.platforms[parseInt(sel.value, 10)])
       emit(); rebuild()
     })
-    box.appendChild(labeledRow('Rides on', sel))
+    sel.title = "This platform moves, and turns, with its parent — even if it has no motion of its own."
+    box.appendChild(labeledRow('Parent', sel))
     return box
   }
 
@@ -1982,11 +2000,20 @@ export function initEditor(opts: {
     })
 
     const hdr = document.createElement('div'); hdr.className = 'segment-header'
-    const name = document.createElement('span'); name.textContent = `Platform ${pi + 1}`
+    const name = document.createElement('input'); name.type = 'text'
+    name.value = plat.name ?? ''; name.placeholder = `Platform ${pi + 1}`; name.maxLength = 40
+    name.title = 'Rename this platform (shown in the list and in Parent menus)'
+    name.style.cssText = 'flex:1;min-width:0;font:inherit;background:transparent;color:inherit;border:1px solid transparent;border-radius:3px;padding:1px 4px'
+    name.addEventListener('focus', () => { name.style.borderColor = '#555' })
+    name.addEventListener('input', () => { const v = name.value.trim(); if (v) plat.name = v; else delete plat.name })
+    // Rebuild on commit (not per keystroke, which would drop focus) so the Parent
+    // menus on the other platforms pick up the new name.
+    name.addEventListener('change', () => { emit(); rebuild() })
     const dup = mkBtn('Dup', () => {
       const copy: Platform = {
         points: plat.points.map(p => ({ ...p })),
-        zOrder: plat.zOrder,
+        layer: plat.layer,
+        ...(plat.name ? { name: `${plat.name} copy` } : {}),
         fillColor: plat.fillColor,
         edgeColor: plat.edgeColor,
         friction: plat.friction,
@@ -2009,16 +2036,23 @@ export function initEditor(opts: {
     }, 'del-btn')
     hdr.append(name, dup, del); el.appendChild(hdr)
 
-    // Z-order toggle
+    // Layer: a number, with the ground at GROUND_LAYER (see platformsOnSide).
     const zRow = document.createElement('div'); zRow.className = 'slider-row'
     const zLbl = document.createElement('span'); zLbl.className = 'slider-label'; zLbl.textContent = 'Layer'
-    const frontBtn = mkBtn('Front', () => { plat.zOrder = 'front'; emit(); rebuild() })
-    const backBtn  = mkBtn('Back',  () => { plat.zOrder = 'back';  emit(); rebuild() })
-    frontBtn.style.cssText += ';padding:2px 10px;font-size:11px'
-    backBtn.style.cssText  += ';padding:2px 10px;font-size:11px'
-    frontBtn.style.opacity = plat.zOrder === 'front' ? '1' : '0.4'
-    backBtn.style.opacity  = plat.zOrder === 'back'  ? '1' : '0.4'
-    zRow.append(zLbl, frontBtn, backBtn); el.appendChild(zRow)
+    const layerIn = document.createElement('input'); layerIn.type = 'number'; layerIn.step = '1'; layerIn.className = 'slider-num'
+    layerIn.value = String(plat.layer)
+    const layerNote = document.createElement('span')
+    layerNote.style.cssText = 'font:11px monospace;color:#888;margin-left:6px'
+    const refreshLayerNote = () => { layerNote.textContent = plat.layer >= GROUND_LAYER ? 'in front of ground' : 'behind ground' }
+    refreshLayerNote()
+    layerIn.addEventListener('input', () => {
+      const v = Math.round(layerIn.valueAsNumber)
+      if (!Number.isFinite(v)) return
+      plat.layer = v; refreshLayerNote(); emit()
+    })
+    const layerTip = `Layers below ${GROUND_LAYER} are drawn behind the ground; layers of ${GROUND_LAYER} and above are drawn in front of it. Higher numbers draw on top of lower ones.`
+    zRow.title = layerTip; layerIn.title = layerTip
+    zRow.append(zLbl, layerIn, layerNote); el.appendChild(zRow)
 
     el.appendChild(colorRow('Fill',   plat.fillColor || PLAT_FILL_DEFAULT, v => { plat.fillColor = v; emit() }))
     el.appendChild(colorRow('Edge',   plat.edgeColor || PLAT_EDGE_DEFAULT, v => { plat.edgeColor = v; emit() }))

@@ -78,7 +78,7 @@ func TestMotionSetGuardsBadParents(t *testing.T) {
 // Old course files (no id/parent/motion) must keep loading and re-saving without
 // gaining motion fields.
 func TestPlatformJSONRoundTripStaysStatic(t *testing.T) {
-	in := `{"points":[{"x":0,"y":0},{"x":10,"y":0},{"x":10,"y":10}],"zOrder":"front","fillColor":"#fff","edgeColor":"#000"}`
+	in := `{"points":[{"x":0,"y":0},{"x":10,"y":0},{"x":10,"y":10}],"layer":150,"fillColor":"#fff","edgeColor":"#000"}`
 	var p Platform
 	if err := json.Unmarshal([]byte(in), &p); err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestPlatformJSONRoundTripStaysStatic(t *testing.T) {
 	out, _ := json.Marshal(p)
 	var m map[string]any
 	_ = json.Unmarshal(out, &m)
-	for _, k := range []string{"id", "parent", "motion"} {
+	for _, k := range []string{"id", "parent", "motion", "name"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("static platform serialized %q", k)
 		}

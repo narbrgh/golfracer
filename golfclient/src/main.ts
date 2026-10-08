@@ -1,5 +1,5 @@
-import { buildSegments, terrainY, hexWithAlpha, buildSpline, splineY, waterPoolBounds, ensureCW, SPLINE_BASE_REF, bunkerRimCoeffs, PlatformMotionSet } from './terrain'
-import type { Course, Hole, BuiltSegment, SplineCoeff, Platform } from './terrain'
+import { buildSegments, terrainY, hexWithAlpha, buildSpline, splineY, waterPoolBounds, ensureCW, SPLINE_BASE_REF, bunkerRimCoeffs, PlatformMotionSet, platformsOnSide } from './terrain'
+import type { Course, Hole, BuiltSegment, SplineCoeff } from './terrain'
 import { initEditor } from './editor'
 import { listCourses, getCourse, newCourse } from './courseapi'
 import { platformTime, syncPlatformClock } from './platformClock'
@@ -274,11 +274,11 @@ function drawBunkers() {
   }
 }
 
-function drawPlatforms(which: Platform['zOrder']) {
+function drawPlatforms(above: boolean) {
   const t = platformTime()
-  for (let pi = 0; pi < hole.platforms.length; pi++) {
+  for (const pi of platformsOnSide(hole.platforms, above)) {
     const plat = hole.platforms[pi]
-    if (plat.zOrder !== which || plat.points.length < 3) continue
+    if (plat.points.length < 3) continue
     const pts = platSet.worldPoints(pi, t, ensureCW(plat.points))
     ctx.beginPath()
     ctx.moveTo(pts[0].x, pts[0].y)
@@ -443,6 +443,22 @@ function drawMinimapContent(mc: CanvasRenderingContext2D, box: { x: number; y: n
   mc.beginPath(); mc.rect(box.x, box.y, box.w, box.h); mc.clip()
   mc.fillStyle = sky; mc.fillRect(box.x, box.y, box.w, box.h)
 
+  // Platforms, posed at the current clock; same behind/in-front-of-ground split as the main view.
+  const platT = platformTime()
+  const drawMiniPlatforms = (above: boolean) => {
+    for (const pi of platformsOnSide(hole.platforms, above)) {
+      const plat = hole.platforms[pi]
+      if (plat.points.length < 3) continue
+      const pts = platSet.worldPoints(pi, platT, ensureCW(plat.points))
+      mc.beginPath(); mc.moveTo(mwx(pts[0].x), mwy(pts[0].y))
+      for (let i = 1; i < pts.length; i++) mc.lineTo(mwx(pts[i].x), mwy(pts[i].y))
+      mc.closePath()
+      mc.fillStyle = plat.fillColor || '#f5d800'; mc.fill()
+      mc.strokeStyle = plat.edgeColor || '#b8a000'; mc.lineWidth = 1; mc.stroke()
+    }
+  }
+  drawMiniPlatforms(false)
+
   // Filled terrain: trace the top edge across the world, then close down the
   // right/bottom/left of the box so it fills like the real ground.
   mc.beginPath()
@@ -475,6 +491,8 @@ function drawMinimapContent(mc: CanvasRenderingContext2D, box: { x: number; y: n
     for (let x = bp.leftX + 20; x <= bp.rightX; x += 20) mc.lineTo(mwx(x), mwy(splineY(x, bp.coeffs)))
     mc.stroke()
   }
+
+  drawMiniPlatforms(true)
 
   // Flag (hole) + ball.
   mc.fillStyle = '#e44'; mc.beginPath()
@@ -520,7 +538,7 @@ function drawStaticWorld() {
   ctx.fillRect(0, 0, hole.worldW, hole.worldH)
 
   drawSunAndMountains()
-  drawPlatforms('back')
+  drawPlatforms(false)
 
   // Water is drawn before the ground, as a plain rectangle — the ground fill
   // (opaque all the way down to worldH) then paints over whatever part of
@@ -558,7 +576,7 @@ function drawStaticWorld() {
   ctx.fillStyle = '#ffffff'
   for (const tx of hole.tees) ctx.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
 
-  drawPlatforms('front')
+  drawPlatforms(true)
   drawHazards()
 
   const flagBaseX = hole.holeX + HOLE_W / 2, flagBaseY = tY(hole.holeX + HOLE_W / 2)

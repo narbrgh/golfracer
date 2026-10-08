@@ -3,8 +3,7 @@ import '../gameChrome.css'
 import type { Screen } from './screenManager'
 import type { MatchHole, MatchState, MatchLeaderboard, MatchBall } from '../lobbyNet'
 import type { Hole, BuiltSegment, SplineCoeff } from '../terrain'
-import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs, normalizeTees, ensureCW, PlatformMotionSet } from '../terrain'
-import type { Platform } from '../terrain'
+import { buildSegments, terrainY, buildSpline, splineY, waterPoolBounds, hexWithAlpha, SPLINE_BASE_REF, baseOffset, bunkerRimCoeffs, normalizeTees, ensureCW, PlatformMotionSet, platformsOnSide } from '../terrain'
 import { colorHex } from './roomLobby'
 import { platformTime, syncPlatformClock } from '../platformClock'
 import { GameCamera, mountGameChrome } from '../gameCamera'
@@ -280,10 +279,10 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     g.fillRect(0, 0, h.worldW, h.worldH)
 
     const platT = platformTime()
-    const drawPlatforms = (which: Platform['zOrder']) => {
-      for (let pi = 0; pi < h.platforms.length; pi++) {
+    const drawPlatforms = (above: boolean) => {
+      for (const pi of platformsOnSide(h.platforms, above)) {
         const plat = h.platforms[pi]
-        if (plat.zOrder !== which || plat.points.length < 3) continue
+        if (plat.points.length < 3) continue
         const pts = platSet.worldPoints(pi, platT, ensureCW(plat.points))
         g.beginPath()
         g.moveTo(pts[0].x, pts[0].y)
@@ -293,7 +292,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         g.strokeStyle = plat.edgeColor || '#b8a000'; g.lineWidth = 2 * iz; g.stroke()
       }
     }
-    drawPlatforms('back')
+    drawPlatforms(false)
 
     for (const p of waterPools) {
       const wg = g.createLinearGradient(0, p.level, 0, p.floorY)
@@ -341,7 +340,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     g.fillStyle = '#fff'
     for (const tx of h.tees) g.fillRect(tx - 3, tY(tx) - TEE_H, 6, TEE_H)
 
-    drawPlatforms('front')
+    drawPlatforms(true)
 
     const fx = h.holeX + HOLE_W / 2, fy = tY(h.holeX + HOLE_W / 2)
     g.strokeStyle = '#bbb'; g.lineWidth = 2 * iz
@@ -492,6 +491,21 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       mc.save()
       mc.beginPath(); mc.rect(box.x, box.y, box.w, box.h); mc.clip()
       mc.fillStyle = sky; mc.fillRect(box.x, box.y, box.w, box.h)
+      // Platforms, posed at the current clock; same behind/in-front-of-ground split as the main view.
+      const miniPlatT = platformTime()
+      const drawMiniPlatforms = (above: boolean) => {
+        for (const pi of platformsOnSide(h.platforms, above)) {
+          const plat = h.platforms[pi]
+          if (plat.points.length < 3) continue
+          const pts = platSet.worldPoints(pi, miniPlatT, ensureCW(plat.points))
+          mc.beginPath(); mc.moveTo(mwx(pts[0].x), mwy(pts[0].y))
+          for (let i = 1; i < pts.length; i++) mc.lineTo(mwx(pts[i].x), mwy(pts[i].y))
+          mc.closePath()
+          mc.fillStyle = plat.fillColor || '#f5d800'; mc.fill()
+          mc.strokeStyle = plat.edgeColor || '#b8a000'; mc.lineWidth = 1; mc.stroke()
+        }
+      }
+      drawMiniPlatforms(false)
       mc.beginPath(); mc.moveTo(mwx(0), mwy(tY(0)))
       for (let x = stepx; x <= h.worldW; x += stepx) mc.lineTo(mwx(x), mwy(tY(x)))
       mc.lineTo(box.x + box.w, box.y + box.h); mc.lineTo(box.x, box.y + box.h); mc.closePath()
@@ -508,6 +522,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
         for (let x = bk.leftX + 20; x <= bk.rightX; x += 20) mc.lineTo(mwx(x), mwy(splineY(x, bk.coeffs)))
         mc.stroke()
       }
+      drawMiniPlatforms(true)
       mc.fillStyle = '#e44'; mc.beginPath(); mc.arc(mwx(h.holeX), mwy(tY(h.holeX)), 2, 0, Math.PI * 2); mc.fill()
       if (state) for (const b of state.balls) {
         if (b.sunk) continue

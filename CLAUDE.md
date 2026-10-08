@@ -110,11 +110,14 @@ awards per-hole rank points, "total" aggregates the raw metric.
 segments (`useSpline`/`useWaves`, which can combine), bunkers, water hazards,
 platforms, par, and a full visual theme (sky/mountains/ground/water/sun).
 Migration happens in `coursestore` at the file-read boundary, so the client
-only ever sees current-format data and needs no migration logic.
+only ever sees current-format data and needs no migration logic. Current format is
+v2: a `Platform` has a numeric `layer` (ground = 100; below draws behind the ground,
+100+ in front, ascending within each side; `platformsOnSide` in `terrain.ts`) instead of
+the old v1 `zOrder` "front"/"back" (migrated to 150/50), and an optional cosmetic `name`.
 
 **Animated platforms.** A `Platform` may carry `motion` (`path` = slide through
-waypoints, `rotate` = spin about a pivot), plus `id`/`parent` so one platform rides
-another's motion (a windmill = hub + blades). `points` is always the authored *rest
+waypoints, `rotate` = spin about a pivot), plus `id`/`parent` so one platform moves with
+its parent's motion (even with no motion of its own) (a windmill = hub + blades). `points` is always the authored *rest
 pose*; motion is a pure function of a shared clock `t` that turns it into the pose at
 time `t`. That math lives twice, in `terrain/motion.go` and `terrain.ts`, and **must
 stay identical** — the same golden vectors are asserted in `terrain/motion_test.go`
@@ -258,6 +261,9 @@ Update this section when work lands, so the next session knows where things stan
   (Go vet/tests, `tsc`, `test:motion`, 8 e2e tests) were green when this was written.
   Also fixed along the way: dev client now auto-targets the local server; the platform
   colour picker no longer gets destroyed by a sidebar rebuild.
+  Phase-1 polish also landed: numeric platform `layer` (ground at 100, tooltip in the
+  editor), renameable platforms, the "Rides on" menu is now "Parent", and platforms are
+  drawn in all three minimaps (single-player, match, editor game view).
 - **Next — phase 2, reusable saved objects** (e.g. a windmill = tower + rotating blades;
   the parent/child data model is already in place). Open design questions to settle
   with the owner first: store objects server-side alongside courses or inside each
