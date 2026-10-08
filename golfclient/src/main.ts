@@ -3,6 +3,7 @@ import type { Course, Hole, BuiltSegment, SplineCoeff, Platform } from './terrai
 import { initEditor } from './editor'
 import { listCourses, getCourse, newCourse } from './courseapi'
 import { platformTime, syncPlatformClock } from './platformClock'
+import { wsUrl } from './serverUrls'
 import { SwingEngine, formatDistance, WIND_MPH_SCALE } from './swing'
 import { GameCamera, mountGameChrome } from './gameCamera'
 import './gameChrome.css'
@@ -875,15 +876,7 @@ canvas.addEventListener('pointerdown', (e) => {
 })
 
 // ---- WebSocket ----
-function getWsUrl(): string {
-  const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined
-  if (envUrl && envUrl.trim().length > 0) return envUrl
-
-  const { protocol } = window.location
-  const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${wsProtocol}//api.golfracer.com/ws`
-}
-const ws = new WebSocket(getWsUrl())
+const ws = new WebSocket(wsUrl())
 
 // The server starts on whichever course it loaded from disk; we push the
 // client's active course on connect so both sides agree on what's being played

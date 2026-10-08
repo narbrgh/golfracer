@@ -835,7 +835,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
     },
     setMyId(id) { myId = id },
     setHole(m) {
-      if (typeof m.pt === 'number') syncPlatformClock(m.pt)
+      if (typeof m.pt === 'number') syncPlatformClock(m.pt, m.ptRunning !== false)
       hole = normalizeTees(m.hole)
       windMph = m.wind ?? 0
       render.clear()
@@ -847,7 +847,7 @@ export function createMatchScreen(handlers: MatchHandlers): MatchScreenApi {
       swing.resetForHole(hole.holeX, hole.tees[0])
     },
     setState(m) {
-      if (typeof m.pt === 'number') syncPlatformClock(m.pt)
+      if (typeof m.pt === 'number') syncPlatformClock(m.pt, m.ptRunning !== false)
       state = m
       windMph = m.wind ?? windMph
       stateAt = performance.now()

@@ -5,6 +5,9 @@ browser client renders and sends shots. Single player (with a built-in map
 editor) plus online multiplayer rooms where up to 4 balls race the same hole
 simultaneously. Repo: `github.com/narbrgh/golfracer`.
 
+> **Starting a new session?** Read "Roadmap & status" at the bottom for where things
+> stand and what's next, then "Autonomy" for how to work and which checks to run.
+
 ## Layout
 
 ```
@@ -40,7 +43,7 @@ golfserver/            Go module `golf01/server`, stdlib + gorilla/websocket onl
 
 ```bash
 # Server (from golfserver/)
-go run .                 # listens on :8081
+go run .                 # listens on :8081 — NOT hot-reloaded: restart it after Go changes
 go test ./...
 go vet ./...
 ./deploy.sh              # build linux/amd64 + push to EC2, restart systemd `golf`
@@ -50,7 +53,10 @@ go vet ./...
 npm run dev              # Vite dev server, usually :5173
 npm run build            # tsc && vite build
 npx tsc --noEmit         # typecheck only
-npm run e2e              # Playwright smoke test (see Autonomy > Verify locally)
+npm run test:motion      # platform-motion golden vectors (pure math, no servers)
+npm run e2e              # Playwright suite; builds + runs both servers itself
+npm run e2e -- --use-running   # ...against the dev servers you already have up
+npm run e2e -- --shots         # ...and save screenshots (path printed)
 ```
 
 ## Architecture
@@ -113,9 +119,12 @@ pose*; motion is a pure function of a shared clock `t` that turns it into the po
 time `t`. That math lives twice, in `terrain/motion.go` and `terrain.ts`, and **must
 stay identical** — the same golden vectors are asserted in `terrain/motion_test.go`
 and `e2e/motion.test.mjs` (`npm run test:motion`). The server owns the clock: wall time
-since start in single-player, `tick/60` in matches, stamped on state messages as `pt`
-(extra field, ignored by older clients) with a 2s heartbeat while a hole has motion.
-The client keeps a local clock between stamps (`platformClock.ts`). Physics: edges of
+**since the hole was loaded** in single-player (`setActive` resets it, so every hole
+starts at t=0), and in matches **since GO** on each hole (`holeStart`; held at 0 with
+`ptRunning:false` through countdown/intermission so platforms rest at the start pose).
+It's stamped on state messages as `pt` (extra field, ignored by older clients) with a
+2s heartbeat while a hole has motion. A platform's `phase` is therefore relative to hole
+start. The client keeps a local clock between stamps (`platformClock.ts`). Physics: edges of
 animated platforms carry a surface velocity (finite difference of the pose), `Ball.Tick`
 resolves contacts in the surface's frame, a ball resting on a moving surface is
 `Riding` (still Resting/shootable, but simulated so it's carried), and a moving edge
@@ -148,9 +157,9 @@ A change touching mirrored physics or terrain constants is **both** halves. Depl
 order matters when the course schema grows (e.g. platform `motion`): ship the
 **server first**. An older server silently drops fields it doesn't know when a
 course is saved from the editor, so a new client talking to it would lose motion data.
-Production client talks to `api.golfracer.com`; override with `VITE_API_URL`
-for local work. Both builds stamp a git-hash version visible in the main-menu
-footer.
+Production client talks to `api.golfracer.com`; `npm run dev` automatically
+targets a local server instead (see `src/serverUrls.ts`). Both builds stamp a
+git-hash version visible in the main-menu footer.
 
 ## Known TODO — deploy host hardening (deferred, low priority)
 
@@ -213,18 +222,56 @@ enforce the boundaries; don't try to route around them.
 - Classify each change as client, server, or both (see Deploying) and say so in
   the summary, so the owner knows what a push or deploy would affect.
 
+### Parallel agents / terminal multiplexers
+
+The dev servers use fixed ports (Go `:8081`, a `const` in `main.go`; Vite `:5173`), and
+`npm run e2e` insists on owning both. So only one checkout can run servers or e2e at a
+time. If several agents work in parallel, give each its own `git worktree` (shared
+history, separate working files) and run e2e from one at a time — or make the server
+port configurable first. Never kill another session's `go run .` / `npm run dev`
+without asking.
+
 ### Verify locally
 
 `npm run e2e` does all of the following itself (builds the server, starts both
-with the right env vars, drives headless Chromium, tears down). It owns ports
-8081 and 5173 and refuses to start if they're busy, so stop any dev servers
-first. For manual poking:
+the way a developer would — no env vars — drives headless Chromium, tears down).
+It owns ports 8081 and 5173 and refuses to start if they're busy, so stop any dev
+servers first, or use `npm run e2e -- --use-running` to test the dev servers you
+already have up (it pushes fixture courses into the shared single-player server
+state, which resets any open game tab). For manual poking:
 
 1. `go run .` in `golfserver/` (listens on :8081).
-2. `VITE_API_URL=http://localhost:8081 VITE_WS_URL=ws://localhost:8081/ws npm run dev`
-   in `golfclient/` (:5173). Both are required: `VITE_API_URL` only covers REST
-   (courses, rooms, version); the game and lobby sockets read `VITE_WS_URL` and
-   otherwise silently connect to production (`api.golfracer.com`).
+2. `npm run dev` in `golfclient/` (:5173). In dev mode the client defaults to a
+   server on the same host at :8081 (`src/serverUrls.ts`), so no env vars are
+   needed. Production builds default to `api.golfracer.com`. To point a dev client
+   elsewhere, set `VITE_API_URL` (REST) and `VITE_WS_URL` (game/lobby sockets).
 3. Drive the client with Playwright (already a devDependency) or load it in a
    browser. Local verification needs no push, so there's no wait on Cloudflare
    or a server rebuild.
+
+## Roadmap & status
+
+Update this section when work lands, so the next session knows where things stand.
+
+- **Done — animated platforms, phase 1:** slide/rotate motion, parent chains, riding
+  physics, editor Motion panel + live preview, platform clock reset per hole. All checks
+  (Go vet/tests, `tsc`, `test:motion`, 8 e2e tests) were green when this was written.
+  Also fixed along the way: dev client now auto-targets the local server; the platform
+  colour picker no longer gets destroyed by a sidebar rebuild.
+- **Next — phase 2, reusable saved objects** (e.g. a windmill = tower + rotating blades;
+  the parent/child data model is already in place). Open design questions to settle
+  with the owner first: store objects server-side alongside courses or inside each
+  course file; inserted copies linked to the definition (edit once, update everywhere)
+  or independent; authoring flow ("select several platforms → Save as object" vs a
+  dedicated object editor).
+- **Then — phase 3, tunnels:** probably two platform slabs plus a draw-over-terrain
+  layer (platform edges are already one-sided); may need a "cut the ground away"
+  visual, so read how terrain is drawn before planning.
+- **Ideas:** more obstacles on the same motion system — bounce pad, fan / wind zone,
+  platforms that appear and disappear on a timer.
+- **Known gaps:** no e2e for a multiplayer match with moving platforms; mouse-dragging
+  of waypoint/pivot handles is untested (kind switching and playback are); a ball
+  riding a *rotating* platform is only tested via surface velocity; shove/bounce
+  feel on moving surfaces is untuned (reuses the standard restitution).
+- **Existing courses** in `golfserver/courses/` aren't precious to the owner; they're
+  only used as fixtures (`holegeom` golden test, e2e). Don't hesitate to build new ones.

@@ -5,6 +5,9 @@
 //
 // It owns ports 8081 (Go server; the port is a const in main.go) and 5173, and
 // refuses to start if either is busy so it never fights your own dev servers.
+// `npm run e2e -- --use-running` instead tests the dev servers you already have up
+// (go run . + npm run dev, no env vars) — handy for checking your exact setup, but
+// note the tests push fixture courses into the shared single-player server state.
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -53,7 +56,14 @@ function cleanup() {
 }
 process.on('SIGINT', () => { cleanup(); process.exit(130) })
 
+const USE_RUNNING = process.argv.includes('--use-running')
+
 async function startServers() {
+  if (USE_RUNNING) {
+    await waitUp(API + '/version', 'Go server (:8081) — start it with `go run .` in golfserver/', 3000)
+    await waitUp(APP, 'Vite client (:5173) — start it with `npm run dev` in golfclient/', 3000)
+    return
+  }
   for (const [url, what] of [[API + '/version', 'Go server (:8081)'], [APP, 'Vite client (:5173)']]) {
     if (await isUp(url)) throw new Error(`${what} is already running — stop it first so the test owns the ports`)
   }
@@ -63,12 +73,17 @@ async function startServers() {
   execFileSync('go', ['build', '-o', bin, '.'], { cwd: serverDir, stdio: 'inherit' })
   // cwd matters: the server reads ./courses relative to where it starts.
   children.push(spawn(bin, [], { cwd: serverDir, stdio: 'ignore' }))
-  // Both URLs are required: VITE_API_URL covers REST, VITE_WS_URL the sockets.
-  // Without VITE_WS_URL the client silently talks to production.
+  // Deliberately NO VITE_API_URL / VITE_WS_URL: this is how a developer runs plain
+  // `npm run dev`, and the dev-mode default (serverUrls.ts) must find the local
+  // server by itself. (An earlier version set both, which hid a bug where plain
+  // `npm run dev` silently talked to production.) Strip any inherited overrides.
+  const clientEnv = { ...process.env }
+  delete clientEnv.VITE_API_URL
+  delete clientEnv.VITE_WS_URL
   children.push(spawn(join(clientDir, 'node_modules/.bin/vite'), ['--port', '5173', '--strictPort'], {
     cwd: clientDir,
     stdio: 'ignore',
-    env: { ...process.env, VITE_API_URL: API, VITE_WS_URL: WS },
+    env: clientEnv,
   }))
   await waitUp(API + '/version', 'Go server')
   await waitUp(APP, 'Vite client')
@@ -220,9 +235,10 @@ async function run() {
     })
 
     await test('server: a sliding platform shoves a resting ball (course push → physics → wire)', async () => {
-      // The ball sits on the tee. A wall ping-pongs through it (150px left of the tee to
-      // 150px right), so it sweeps the ball once per half-cycle — in whichever direction the
-      // wall happens to be travelling when the server's platform clock reaches it.
+      // The ball sits on the tee. A wall starts 150px left of the tee and slides right
+      // through it. The platform clock restarts at t=0 whenever a hole is (re)loaded, so
+      // the wall begins at its drawn position and reaches the ball about 1.3s later —
+      // which makes both the timing and the direction (rightwards) deterministic.
       const course0 = await courseWithPlatforms([])
       const hole = course0.holes[0]
       const teeX = hole.tees[0]
@@ -241,11 +257,14 @@ async function run() {
         await waitFor(() => frames.some((f) => f.type === 'event' && f.event === 'reset'), 'reset after course push')
         const reset = frames.filter((f) => f.type === 'event' && f.event === 'reset').at(-1)
         assert.ok(Math.abs(reset.x - teeX) < 2, `ball should start on the tee (${reset.x} vs ${teeX})`)
-        // The platform clock must be present on state frames.
+        // The platform clock must be present on state frames, and must have RESTARTED
+        // for this hole (the server has been up for many seconds by now).
         await waitFor(() => frames.some((f) => f.type === 'state' && typeof f.pt === 'number'), 'state frame carrying pt')
-        // Within one 12s cycle the wall sweeps through the ball and pushes it.
+        const firstPT = frames.filter((f) => f.type === 'state' && typeof f.pt === 'number').at(-1).pt
+        assert.ok(firstPT < 2, `platform clock should restart at the hole load (pt=${firstPT.toFixed(2)})`)
+        // The wall sweeps through the ball and pushes it to the RIGHT.
         try {
-          await waitFor(() => frames.some((f) => f.type === 'state' && f.resting === false && Math.abs(f.x - reset.x) > 5), 'ball pushed by the wall', 20000)
+          await waitFor(() => frames.some((f) => f.type === 'state' && f.resting === false && f.x > reset.x + 5), 'ball pushed right by the wall', 8000)
         } catch (e) {
           const st = frames.filter((f) => f.type === 'state')
           throw new Error(`${e.message}\n tee ${teeX}, ballY ${ballY}; ${st.length} state frames, pt range ${st[0]?.pt?.toFixed(2)}..${st.at(-1)?.pt?.toFixed(2)}; last ${JSON.stringify(st.at(-1))}`)
@@ -345,6 +364,33 @@ async function run() {
       plat = course?.data.holes[course.hole].platforms.at(-1)
       assert.equal(plat?.motion?.kind, 'path')
       assert.ok(plat.motion.waypoints.length >= 1 && plat.motion.speed > 0, 'a path needs waypoints and a speed')
+      assert.deepEqual(rec.errors, [])
+      await page.context().close()
+    })
+
+    await test('editor: a platform colour can be changed (clicking its picker must not rebuild the sidebar)', async () => {
+      const { page, rec } = await openPage(browser)
+      await page.goto(APP)
+      await page.click('[data-action="editor"]')
+      await page.waitForSelector('.editor-overlay', { state: 'visible' })
+      await page.click('.editor-sidebar button:text-is("+ Add Platform")')
+
+      // A real click on the picker. If the sidebar is rebuilt in response, the element
+      // is torn out of the DOM — which in a real browser closes the native colour popup
+      // before a colour can be chosen.
+      const fill = await page.locator('.editor-sidebar .platform-selected input[type=color]').first().elementHandle()
+      await fill.click()
+      assert.ok(await fill.evaluate((n) => n.isConnected), 'clicking the colour picker destroyed it (sidebar was rebuilt)')
+
+      await fill.evaluate((n) => { n.value = '#ff0000'; n.dispatchEvent(new Event('input', { bubbles: true })) })
+      const red = await page.evaluate(() => {
+        const c = document.querySelector('.preview-canvas-wrap canvas')
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data
+        let n = 0
+        for (let i = 0; i < d.length; i += 4) if (d[i] > 240 && d[i + 1] < 20 && d[i + 2] < 20) n++
+        return n
+      })
+      assert.ok(red > 100, `the platform should now be drawn red (found ${red} red px)`)
       assert.deepEqual(rec.errors, [])
       await page.context().close()
     })

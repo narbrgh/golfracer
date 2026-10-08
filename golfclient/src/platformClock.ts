@@ -10,11 +10,23 @@
 
 let offset = 0      // serverPT − localSeconds
 let synced = false
+let frozenAt: number | null = null  // while the server holds the clock (countdown etc.)
 
 const localSeconds = () => performance.now() / 1000
 
-/** Feed a server platform-clock stamp. First stamp (or a big jump) snaps; later ones ease in. */
-export function syncPlatformClock(serverPT: number): void {
+/**
+ * Feed a server platform-clock stamp. First stamp (or a big jump) snaps; later ones
+ * ease in. `running: false` means the server is holding the clock still (a match
+ * countdown / intermission: platforms rest at their start pose), so don't
+ * extrapolate it with the local clock.
+ */
+export function syncPlatformClock(serverPT: number, running = true): void {
+  if (!running) {
+    frozenAt = serverPT
+    synced = false // the next running stamp must snap, not ease
+    return
+  }
+  frozenAt = null
   const measured = serverPT - localSeconds()
   if (!synced || Math.abs(measured - offset) > 0.25) {
     offset = measured
@@ -28,5 +40,5 @@ export function syncPlatformClock(serverPT: number): void {
 
 /** Current platform time in seconds. Before any server stamp it just counts from page load. */
 export function platformTime(): number {
-  return localSeconds() + offset
+  return frozenAt ?? localSeconds() + offset
 }

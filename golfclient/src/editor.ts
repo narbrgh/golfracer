@@ -1892,7 +1892,9 @@ export function initEditor(opts: {
         choice('Smooth', (m.ease ?? 'sine') === 'sine', () => { m.ease = 'sine'; emit(); rebuild() }),
         choice('Linear', m.ease === 'linear', () => { m.ease = 'linear'; emit(); rebuild() }),
       ))
-      box.appendChild(sliderRow('Offset', m.phase ?? 0, 0, 1, 0.05, v => { m.phase = v; emit() }, v => v.toFixed(2)))
+      const startRow = sliderRow('Start at', m.phase ?? 0, 0, 1, 0.05, v => { m.phase = v; emit() }, v => v.toFixed(2))
+      startRow.title = 'Where along its route the platform is when the clock reads 0, as a fraction of one full trip (0 = at its drawn position, 0.5 = halfway round). Use different values to keep several platforms out of step.'
+      box.appendChild(startRow)
       const wps = m.waypoints ?? (m.waypoints = [])
       const wpRow = labeledRow('Waypoints',
         small(mkBtn('+ Add', () => {
@@ -1918,7 +1920,9 @@ export function initEditor(opts: {
         readout.style.color = v > MAX_PLATFORM_SPEED ? '#f66' : '#888'
       }
       box.appendChild(sliderRow('Spin rpm', m.rpm ?? 6, -30, 30, 0.5, v => { m.rpm = v; refreshReadout(); emit() }, v => v.toFixed(1)))
-      box.appendChild(sliderRow('Start °', m.phase ?? 0, 0, 360, 5, v => { m.phase = v; emit() }))
+      const angleRow = sliderRow('Start angle', m.phase ?? 0, 0, 360, 5, v => { m.phase = v; emit() })
+      angleRow.title = 'How far the platform is already turned (degrees, clockwise) when the clock reads 0. Use different values to keep several spinners out of step.'
+      box.appendChild(angleRow)
       box.appendChild(labeledRow('Pivot',
         small(mkBtn('Center', () => { m.pivot = platCentroid(plat.points); selectPlatform(pi); emit(); rebuild() })),
         (() => {
@@ -1962,7 +1966,20 @@ export function initEditor(opts: {
     const el = document.createElement('div')
     el.className = 'editor-segment' + (pi === selectedPlatIdx ? ' platform-selected' : '')
     el.style.cursor = 'pointer'
-    el.addEventListener('click', () => { selectPlatform(pi); rebuild() })
+    el.addEventListener('click', (e) => {
+      selectPlatform(pi)
+      // A click on a control inside the panel (colour picker, slider, select) must NOT
+      // rebuild the sidebar: that tears the control out of the DOM mid-click, which
+      // closes the browser's native colour popup before a colour can be chosen. Just
+      // move the highlight and repaint the preview instead.
+      if ((e.target as HTMLElement).closest('input, select, button')) {
+        sidebar.querySelectorAll('.platform-selected').forEach(n => n.classList.remove('platform-selected'))
+        el.classList.add('platform-selected')
+        drawPreview()
+        return
+      }
+      rebuild()
+    })
 
     const hdr = document.createElement('div'); hdr.className = 'segment-header'
     const name = document.createElement('span'); name.textContent = `Platform ${pi + 1}`

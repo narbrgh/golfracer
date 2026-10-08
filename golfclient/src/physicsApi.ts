@@ -1,12 +1,8 @@
+import { apiBase } from './serverUrls'
 // Client-side access to the server's live, session-only physics tunables (the
 // "Ken" debug menu). Nothing here is persisted to disk — the server just holds
 // these in memory, so a restart resets to PhysicsTunables defaults.
-function getApiBase(): string {
-  const envUrl = (import.meta as any).env?.VITE_API_URL as string | undefined
-  if (envUrl && envUrl.trim().length > 0) return envUrl
-  return `${window.location.protocol}//api.golfracer.com`
-}
-const BASE = getApiBase()
+const BASE = apiBase()
 
 export interface PhysicsTunables {
   gravity: number

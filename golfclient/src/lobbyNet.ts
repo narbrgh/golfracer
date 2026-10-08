@@ -2,6 +2,7 @@
 // join / leave, all in-room actions, and — once a match starts — the gameplay
 // messages (match:hole/state/leaderboard/end) and shoot commands.
 import type { Hole } from './terrain'
+import { wsUrl } from './serverUrls'
 
 export interface MatchBall {
   playerId: number
@@ -31,6 +32,7 @@ export interface MatchState {
   balls: MatchBall[]
   wind: number // current hole wind, mph (+right / -left)
   pt?: number // platform clock (s) — what animated platforms' motion is a function of
+  ptRunning?: boolean // false while the server holds the clock at 0 (countdown/intermission)
 }
 
 export interface MatchHole {
@@ -39,6 +41,7 @@ export interface MatchHole {
   hole: Hole
   wind: number // current hole wind, mph (+right / -left)
   pt?: number // platform clock (s); see MatchState.pt
+  ptRunning?: boolean
 }
 
 export interface LeaderEntry {
@@ -114,16 +117,8 @@ export class LobbyNet {
     this.handlers = handlers
   }
 
-  private defaultWsUrl(): string {
-    const { protocol } = window.location
-    const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${wsProtocol}//api.golfracer.com/ws`
-  }
-
   connect(): void {
-    const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined
-    let url = envUrl && envUrl.trim().length > 0 ? envUrl : this.defaultWsUrl()
-    url = url.replace('/ws', '/lobby')
+    const url = wsUrl().replace('/ws', '/lobby')
     const ws = new WebSocket(url)
     this.ws = ws
     ws.onmessage = (e) => this.onMessage(JSON.parse(e.data))

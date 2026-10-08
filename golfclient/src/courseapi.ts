@@ -4,14 +4,10 @@
 // already current-format.
 import type { Course, Hole } from './terrain'
 import { DEFAULT_HOLE, CURRENT_FORMAT_VERSION, normalizeTees } from './terrain'
+import { apiBase } from './serverUrls'
 
 // HTTP base for the Go server. The WebSocket uses the same origin.
-function getApiBase(): string {
-  const envUrl = (import.meta as any).env?.VITE_API_URL as string | undefined
-  if (envUrl && envUrl.trim().length > 0) return envUrl
-  return `${window.location.protocol}//api.golfracer.com`
-}
-const BASE = getApiBase()
+const BASE = apiBase()
 
 export interface CourseInfo {
   id: string

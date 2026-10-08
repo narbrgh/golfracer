@@ -237,12 +237,14 @@ func main() {
 	// geom.Nearby. The same circle-vs-edge response in physics.Ball.Tick handles
 	// every edge identically regardless of origin.
 	var geom holegeom.Geometry
-	// Platform clock: seconds since the server started, shared by physics and (via
-	// stateMsg.PT) the client, so animated platforms are in the same place for both.
-	// Wall time rather than a tick count because the loop stays quiet while the
-	// ball rests, yet platforms keep moving.
-	serverStart := time.Now()
-	platClock := func() float64 { return time.Since(serverStart).Seconds() }
+	// Platform clock: seconds since the current hole was loaded, shared by physics
+	// and (via stateMsg.PT) the client, so animated platforms are in the same place
+	// for both — and every hole starts with platforms at the pose the editor shows
+	// at t=0 (plus their configured start offsets). Wall time rather than a tick
+	// count because the loop stays quiet while the ball rests, yet platforms keep
+	// moving. Reset by setActive.
+	platEpoch := time.Now()
+	platClock := func() float64 { return time.Since(platEpoch).Seconds() }
 	var terrainEdges []physics.Edge // static edges, for the soft-lock diagnostic
 	rebuildEdges := func() {
 		waterTraps = computeWaterTraps()
@@ -341,6 +343,7 @@ func main() {
 		if len(c.Holes) == 0 {
 			return
 		}
+		platEpoch = time.Now() // new hole (or an edit): platform motion restarts from t=0
 		if idx < 0 || idx >= len(c.Holes) {
 			idx = 0
 		}

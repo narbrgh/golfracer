@@ -770,8 +770,17 @@ func ticksToMs(t uint64) int { return int(t) * 1000 / 60 }
 const clockHeartbeatTicks = 120
 
 // platformTime is the shared clock (seconds) that animated platforms are a
-// function of: the match tick counter, which advances identically for all balls.
-func (mt *Match) platformTime() float64 { return float64(mt.tick) / 60 }
+// function of. It is 0 at the moment play begins on each hole (holeStart) and then
+// counts the match ticks, which advance identically for all balls, so every player
+// faces the same platform timing. Before GO (countdown, intermission) and after the
+// hole ends the clock is held at 0 — platforms rest at their start pose — and
+// messages say so via "ptRunning" so clients stop extrapolating it.
+func (mt *Match) platformTime() float64 {
+	if mt.phase != PhasePlaying {
+		return 0
+	}
+	return float64(mt.tick-mt.holeStart) / 60
+}
 
 func (mt *Match) sendHole(idx int) {
 	mt.emit(map[string]any{
@@ -781,6 +790,7 @@ func (mt *Match) sendHole(idx int) {
 		"hole":      mt.holes[idx],
 		"wind":      mt.windMph,
 		"pt":        mt.platformTime(),
+		"ptRunning": mt.phase == PhasePlaying,
 	})
 }
 
@@ -842,6 +852,7 @@ func (mt *Match) broadcastState() {
 		"balls":     balls,
 		"wind":      mt.windMph,
 		"pt":        mt.platformTime(),
+		"ptRunning": mt.phase == PhasePlaying,
 	})
 }
 
